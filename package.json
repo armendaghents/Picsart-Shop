@@ -1,0 +1,27 @@
+{
+  "name": "atlas-search",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Enterprise search and inventory platform with a React storefront and an admin console, backed by SQLite.",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm --prefix web install && npm --prefix web run build",
+    "postinstall": "npm --prefix web install",
+    "db:reset": "node db/init.js --reset"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "helmet": "^8.0.0",
+    "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {}
+}
