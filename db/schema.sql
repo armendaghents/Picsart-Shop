@@ -30,8 +30,8 @@ CREATE TABLE IF NOT EXISTS inventory_items (
   brand TEXT,
   model TEXT,
   category_id INTEGER NOT NULL REFERENCES categories(id),
-  warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
-  location_id INTEGER NOT NULL REFERENCES locations(id),
+  warehouse_id INTEGER REFERENCES warehouses(id),
+  location_id INTEGER REFERENCES locations(id),
   status TEXT NOT NULL DEFAULT 'Available',
   condition TEXT NOT NULL DEFAULT 'New',  -- 'New' or 'Used'
   quantity INTEGER NOT NULL DEFAULT 0,
@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS inventory_items (
   images TEXT,      -- JSON array of photo URLs, e.g. ["/uploads/a.jpg","/uploads/b.jpg"] — first is the main photo (falls back to icon+colors tile when empty)
   colors TEXT,      -- JSON array, e.g. ["#107c72","#5f6fb5"]
   tags TEXT,        -- JSON array, e.g. ["gaming pc","desktop"]
+  custom_fields TEXT, -- JSON array of admin-defined {key, value} pairs for product-specific specs
   added_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   deleted_at TEXT
@@ -74,3 +75,21 @@ CREATE TABLE IF NOT EXISTS search_events (
   result_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Customer orders placed from the storefront "Order" button. Product fields
+-- are snapshotted at order time so history stays accurate even if the item
+-- is later edited or deleted.
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  inventory_item_id INTEGER NOT NULL REFERENCES inventory_items(id),
+  sku TEXT NOT NULL,
+  name TEXT NOT NULL,
+  brand TEXT,
+  model TEXT,
+  category TEXT,
+  quantity INTEGER NOT NULL DEFAULT 1,
+  price REAL NOT NULL DEFAULT 0,
+  ordered_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_orders_ordered_at ON orders(ordered_at);

@@ -279,6 +279,81 @@ function runMigrations(db) {
       for (const row of rows) update.run(JSON.stringify([row.image_url]), row.id);
     }
   }
+
+  if (!columns.includes("custom_fields")) {
+    db.exec("ALTER TABLE inventory_items ADD COLUMN custom_fields TEXT");
+  }
+
+  // SQLite can't drop a NOT NULL constraint with ALTER TABLE, so making
+  // warehouse/location optional on an existing database means rebuilding the
+  // table. Only runs once, the first time this version starts against an
+  // older database — freshly created databases already get nullable columns
+  // straight from schema.sql.
+  const warehouseCol = db.prepare("PRAGMA table_info(inventory_items)").all().find((c) => c.name === "warehouse_id");
+  if (warehouseCol && warehouseCol.notnull) {
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec("BEGIN TRANSACTION");
+    try {
+      db.exec(`
+        CREATE TABLE inventory_items_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          external_id TEXT NOT NULL UNIQUE,
+          sku TEXT NOT NULL UNIQUE,
+          barcode TEXT,
+          serial_number TEXT,
+          name TEXT NOT NULL,
+          brand TEXT,
+          model TEXT,
+          category_id INTEGER NOT NULL REFERENCES categories(id),
+          warehouse_id INTEGER REFERENCES warehouses(id),
+          location_id INTEGER REFERENCES locations(id),
+          status TEXT NOT NULL DEFAULT 'Available',
+          condition TEXT NOT NULL DEFAULT 'New',
+          quantity INTEGER NOT NULL DEFAULT 0,
+          reserved_quantity INTEGER NOT NULL DEFAULT 0,
+          reorder_point INTEGER NOT NULL DEFAULT 5,
+          purchase_price REAL NOT NULL DEFAULT 0,
+          selling_price REAL NOT NULL DEFAULT 0,
+          currency TEXT NOT NULL DEFAULT 'USD',
+          description TEXT,
+          ocr_text TEXT,
+          icon TEXT,
+          images TEXT,
+          colors TEXT,
+          tags TEXT,
+          custom_fields TEXT,
+          added_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          deleted_at TEXT
+        )
+      `);
+      db.exec(`
+        INSERT INTO inventory_items_new
+        SELECT id, external_id, sku, barcode, serial_number, name, brand, model,
+          category_id, warehouse_id, location_id, status, condition, quantity, reserved_quantity, reorder_point,
+          purchase_price, selling_price, currency, description, ocr_text, icon, images, colors, tags, custom_fields,
+          added_at, updated_at, deleted_at
+        FROM inventory_items
+      `);
+      db.exec("DROP TABLE inventory_items");
+      db.exec("ALTER TABLE inventory_items_new RENAME TO inventory_items");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_items_category ON inventory_items(category_id)");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_items_warehouse ON inventory_items(warehouse_id)");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_items_status ON inventory_items(status)");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_items_deleted ON inventory_items(deleted_at)");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    } finally {
+      db.exec("PRAGMA foreign_keys = ON");
+    }
+  }
+
+  const orderColumns = db.prepare("PRAGMA table_info(orders)").all().map((column) => column.name);
+  if (!orderColumns.includes("category")) {
+    db.exec("ALTER TABLE orders ADD COLUMN category TEXT");
+  }
 }
 
 export function openDatabase({ reset = false } = {}) {

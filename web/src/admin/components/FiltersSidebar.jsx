@@ -1,17 +1,7 @@
 const formatMoney = (amount) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(amount || 0);
 
-function topFacets(items) {
-  const counts = items.reduce((map, item) => {
-    for (const tag of item.tags.slice(0, 4)) map.set(tag, (map.get(tag) || 0) + 1);
-    return map;
-  }, new Map());
-  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
-}
-
-export default function FiltersSidebar({ facets, filters, onChange, onReset, items }) {
-  const facetList = topFacets(items);
-
+export default function FiltersSidebar({ facets, filters, onChange, onReset }) {
   return (
     <aside className="filters" aria-label="Search filters">
       <div className="filter-head">
@@ -26,6 +16,18 @@ export default function FiltersSidebar({ facets, filters, onChange, onReset, ite
         <select value={filters.category} onChange={(event) => onChange({ category: event.target.value })}>
           <option value="All">All</option>
           {facets.categories.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label>
+        Model
+        <select value={filters.model} onChange={(event) => onChange({ model: event.target.value })}>
+          <option value="All">All</option>
+          {facets.models.map((name) => (
             <option key={name} value={name}>
               {name}
             </option>
@@ -64,26 +66,20 @@ export default function FiltersSidebar({ facets, filters, onChange, onReset, ite
           min="0"
           max="10000"
           step="100"
-          value={filters.maxPrice}
+          disabled={!Number.isFinite(filters.maxPrice)}
+          value={Number.isFinite(filters.maxPrice) ? filters.maxPrice : 10000}
           onChange={(event) => onChange({ maxPrice: Number(event.target.value) })}
         />
-        <span>{formatMoney(filters.maxPrice)}</span>
+        <span>{Number.isFinite(filters.maxPrice) ? formatMoney(filters.maxPrice) : "No limit"}</span>
       </label>
-
-      <div className="facets">
-        <h3>Top Facets</h3>
-        <div className="facet-list">
-          {facetList.length ? (
-            facetList.map(([name, count]) => (
-              <span className="facet" key={name}>
-                {name} · {count}
-              </span>
-            ))
-          ) : (
-            <span className="facet">No facets</span>
-          )}
-        </div>
-      </div>
+      <label className="checkbox-label">
+        <input
+          type="checkbox"
+          checked={!Number.isFinite(filters.maxPrice)}
+          onChange={(event) => onChange({ maxPrice: event.target.checked ? Infinity : 10000 })}
+        />
+        No limit (show items over $10,000)
+      </label>
     </aside>
   );
 }

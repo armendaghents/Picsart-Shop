@@ -9,12 +9,31 @@ function conditionClass(condition) {
   return `condition-pill condition-${condition.toLowerCase()}`;
 }
 
-export default function ProductModal({ product, t, currency, onClose }) {
+export default function ProductModal({ product, t, currency, onClose, onOrder }) {
   const [photoIndex, setPhotoIndex] = useState(0);
+  const [orderState, setOrderState] = useState("idle"); // idle | ordering | ordered | error
+  const [zoomed, setZoomed] = useState(false);
+  const [zoomOrigin, setZoomOrigin] = useState({ x: 50, y: 50 });
 
   useEffect(() => {
     setPhotoIndex(0);
+    setOrderState("idle");
+    setZoomed(false);
   }, [product?.id]);
+
+  useEffect(() => {
+    setZoomed(false);
+  }, [photoIndex]);
+
+  async function handleOrder() {
+    setOrderState("ordering");
+    try {
+      await onOrder(product.id);
+      setOrderState("ordered");
+    } catch {
+      setOrderState("error");
+    }
+  }
 
   useEffect(() => {
     function handleKeyDown(event) {
@@ -23,6 +42,23 @@ export default function ProductModal({ product, t, currency, onClose }) {
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+
+  function pointFromEvent(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = Math.min(100, Math.max(0, ((event.clientX - rect.left) / rect.width) * 100));
+    const y = Math.min(100, Math.max(0, ((event.clientY - rect.top) / rect.height) * 100));
+    return { x, y };
+  }
+
+  function handleImageClick(event) {
+    setZoomOrigin(pointFromEvent(event));
+    setZoomed((current) => !current);
+  }
+
+  function handleImageMouseMove(event) {
+    if (!zoomed) return;
+    setZoomOrigin(pointFromEvent(event));
+  }
 
   if (!product) return null;
 
@@ -43,7 +79,18 @@ export default function ProductModal({ product, t, currency, onClose }) {
           ×
         </button>
         <div className="product-art product-modal-art" style={{ "--art-a": product.colors[0], "--art-b": product.colors[1] }}>
-          {photos ? <img src={photos[photoIndex]} alt={product.name} /> : <span>{product.icon}</span>}
+          {photos ? (
+            <img
+              src={photos[photoIndex]}
+              alt={product.name}
+              className={`zoomable-image${zoomed ? " zoomable-image-zoomed" : ""}`}
+              style={{ transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%` }}
+              onClick={handleImageClick}
+              onMouseMove={handleImageMouseMove}
+            />
+          ) : (
+            <span>{product.icon}</span>
+          )}
 
           {photos && photos.length > 1 && (
             <>
@@ -94,6 +141,17 @@ export default function ProductModal({ product, t, currency, onClose }) {
             <span className={`stock${product.inStock ? "" : " stock-empty"}`}>
               {product.inStock ? t.inStockSuffix(product.availableQuantity) : t.unavailable}
             </span>
+          </div>
+          <div className="product-modal-order">
+            <button
+              type="button"
+              className="command-button"
+              onClick={handleOrder}
+              disabled={!product.inStock || orderState === "ordering"}
+            >
+              {orderState === "ordering" ? t.ordering : orderState === "ordered" ? t.ordered : t.orderButton}
+            </button>
+            {orderState === "error" && <p className="order-error">{t.orderFailed}</p>}
           </div>
           <p className="product-modal-description">{product.description}</p>
           <div className="product-modal-tags">

@@ -1,5 +1,3 @@
-const QUICK_SEARCHES = ["gaming pc", "barcode scanner", "OCR camera", "UPS battery", "temperature sensor", "monitor"];
-
 export default function SearchConsole({ query, onQueryChange }) {
   return (
     <section className="search-console" aria-label="Search console">
@@ -18,14 +16,6 @@ export default function SearchConsole({ query, onQueryChange }) {
             ×
           </button>
         )}
-      </div>
-
-      <div className="quick-searches">
-        {QUICK_SEARCHES.map((search) => (
-          <button key={search} className="chip" type="button" onClick={() => onQueryChange(search)}>
-            {search}
-          </button>
-        ))}
       </div>
     </section>
   );

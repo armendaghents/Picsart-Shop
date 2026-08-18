@@ -1,4 +1,5 @@
 import { highlight } from "../highlight.jsx";
+import Pagination from "../../components/Pagination";
 
 const formatMoney = (amount) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(amount || 0);
@@ -11,13 +12,13 @@ function conditionClass(condition) {
   return `condition-pill condition-${condition.toLowerCase()}`;
 }
 
-export default function InventoryResults({ items, query, sort, onSortChange, onEdit, onDelete }) {
+export default function InventoryResults({ items, total, query, sort, onSortChange, onEdit, onDelete, page, totalPages, onPageChange }) {
   return (
     <section className="results-panel" aria-label="Search results">
       <div className="result-toolbar">
         <div>
           <h2>{query ? `Results for "${query}"` : "Inventory"}</h2>
-          <p>{items.length} matching items · sorted by {sort} · SQLite</p>
+          <p>{total} matching items · sorted by {sort}</p>
         </div>
         <select aria-label="Sort results" value={sort} onChange={(event) => onSortChange(event.target.value)}>
           <option value="relevance">Relevance</option>
@@ -49,7 +50,7 @@ export default function InventoryResults({ items, query, sort, onSortChange, onE
                 <div className="meta-row">
                   <span>{item.sku}</span>
                   <span>{item.category.split(">").map((part) => part.trim()).at(-1)}</span>
-                  <span>{item.warehouse} · {item.location}</span>
+                  <span>{item.warehouse ? [item.warehouse, item.location].filter(Boolean).join(" · ") : "Unassigned"}</span>
                   <span className={availabilityClass(item.availability)}>{item.availability}</span>
                   {item.condition && <span className={conditionClass(item.condition)}>{item.condition}</span>}
                 </div>
@@ -74,14 +75,12 @@ export default function InventoryResults({ items, query, sort, onSortChange, onE
                   </button>
                 </div>
               </div>
-              <div className="product-tooltip" aria-hidden="true">
-                <strong>Quick details</strong>
-                <p>{item.description}</p>
-              </div>
             </article>
           ))}
         </div>
       )}
+
+      <Pagination page={page} totalPages={totalPages} onPageChange={onPageChange} />
     </section>
   );
 }

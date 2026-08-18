@@ -7,7 +7,7 @@ export const LANGUAGES = [
 export const TRANSLATIONS = {
   en: {
     tagline: "Search products & check availability",
-    searchPlaceholder: "Search by product name, brand, category, or SKU",
+    searchPlaceholder: "Search Picsart Shop",
     category: "Category",
     allCategories: "All categories",
     inStockOnly: "In stock only",
@@ -23,6 +23,10 @@ export const TRANSLATIONS = {
     emptyState: "No products match your search right now.",
     inStockSuffix: (n) => `${n} in stock`,
     unavailable: "Currently unavailable",
+    orderButton: "Order",
+    ordering: "Placing order…",
+    ordered: "Order placed!",
+    orderFailed: "Couldn't place order",
     availability: {
       "In Stock": "In Stock",
       "Low Stock": "Low Stock",
@@ -33,7 +37,7 @@ export const TRANSLATIONS = {
   },
   ru: {
     tagline: "Поиск товаров и проверка наличия",
-    searchPlaceholder: "Поиск по названию, бренду, категории или артикулу",
+    searchPlaceholder: "Поиск в Picsart Shop",
     category: "Категория",
     allCategories: "Все категории",
     inStockOnly: "Только в наличии",
@@ -49,6 +53,10 @@ export const TRANSLATIONS = {
     emptyState: "По вашему запросу ничего не найдено.",
     inStockSuffix: (n) => `${n} в наличии`,
     unavailable: "Сейчас недоступно",
+    orderButton: "Заказать",
+    ordering: "Оформляем заказ…",
+    ordered: "Заказ оформлен!",
+    orderFailed: "Не удалось оформить заказ",
     availability: {
       "In Stock": "В наличии",
       "Low Stock": "Мало на складе",
@@ -59,7 +67,7 @@ export const TRANSLATIONS = {
   },
   hy: {
     tagline: "Փնտրեք ապրանքներ և ստուգեք առկայությունը",
-    searchPlaceholder: "Փնտրեք ըստ անվան, ապրանքանիշի, կատեգորիայի կամ SKU-ի",
+    searchPlaceholder: "Փնտրեք Picsart Shop-ում",
     category: "Կատեգորիա",
     allCategories: "Բոլոր կատեգորիաները",
     inStockOnly: "Միայն առկան",
@@ -75,6 +83,10 @@ export const TRANSLATIONS = {
     emptyState: "Ձեր որոնմանը համապատասխան ապրանք չի գտնվել։",
     inStockSuffix: (n) => `${n} հատ առկա`,
     unavailable: "Ներկայումս անհասանելի է",
+    orderButton: "Պատվիրել",
+    ordering: "Պատվերը կատարվում է…",
+    ordered: "Պատվերը կատարված է!",
+    orderFailed: "Չհաջողվեց կատարել պատվերը",
     availability: {
       "In Stock": "Առկա է",
       "Low Stock": "Քիչ է մնացել",
@@ -84,15 +96,3 @@ export const TRANSLATIONS = {
     },
   },
 };
-
-// The underlying search query stays in English (that's what matches the
-// catalog text in the database); only the visible chip label is localized.
-export const QUICK_SEARCHES = [
-  { q: "gaming pc", en: "gaming pc", ru: "игровой ПК", hy: "խաղային համակարգիչ" },
-  { q: "mac", en: "Mac", ru: "Mac", hy: "Mac" },
-  { q: "monitor", en: "monitor", ru: "монитор", hy: "մոնիտոր" },
-  { q: "camera", en: "camera", ru: "камера", hy: "տեսախցիկ" },
-  { q: "scanner", en: "scanner", ru: "сканер", hy: "սկաներ" },
-  { q: "battery", en: "battery", ru: "аккумулятор", hy: "մարտկոց" },
-  { q: "sensor", en: "sensor", ru: "датчик", hy: "սենսոր" },
-];

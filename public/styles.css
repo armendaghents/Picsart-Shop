@@ -1,37 +1,37 @@
 :root {
   color-scheme: light;
-  --bg: #f6f1e7;
-  --panel: #fffcf6;
-  --panel-2: #ece2cd;
-  --text: #2a251d;
-  --muted: #7d7261;
-  --line: #e3d7bf;
-  --accent: #b3813a;
-  --accent-2: #bd6a41;
-  --accent-3: #8a7a4e;
+  --bg: #f8f6fc;
+  --panel: #ffffff;
+  --panel-2: #f1ecf9;
+  --text: #201a2e;
+  --muted: #786f8c;
+  --line: #e4dced;
+  --accent: #9b1fce;
+  --accent-2: #0fc7bd;
+  --accent-3: #6a3fd1;
   --success: #3f8f5c;
   --warn: #bd8a1f;
   --danger: #b3462f;
-  --shadow: 0 14px 34px rgba(60, 45, 20, 0.09);
-  --page-gradient: linear-gradient(180deg, #faf6ec 0%, var(--bg) 45%, #f7f0e1 100%);
+  --shadow: 0 14px 34px rgba(60, 20, 90, 0.1);
+  --page-gradient: linear-gradient(180deg, #fbf9fe 0%, var(--bg) 45%, #f5eefb 100%);
 }
 
 :root.dark {
   color-scheme: dark;
-  --bg: #060605;
-  --panel: #121110;
-  --panel-2: #1b1a17;
-  --text: #f1ece0;
-  --muted: #a49a89;
-  --line: #2b2823;
-  --accent: #e0aa5c;
-  --accent-2: #e28a5e;
-  --accent-3: #bdb28f;
+  --bg: #0a0710;
+  --panel: #161020;
+  --panel-2: #1e1830;
+  --text: #f1ecf8;
+  --muted: #a89cc0;
+  --line: #2e2645;
+  --accent: #d34fe8;
+  --accent-2: #2fe0d6;
+  --accent-3: #9a6ef0;
   --success: #5cc78a;
   --warn: #d99a3a;
   --danger: #e0705a;
   --shadow: 0 18px 45px rgba(0, 0, 0, 0.6);
-  --page-gradient: linear-gradient(180deg, #030303 0%, var(--bg) 45%, #020202 100%);
+  --page-gradient: linear-gradient(180deg, #050308 0%, var(--bg) 45%, #030208 100%);
 }
 
 * {
@@ -85,12 +85,9 @@ button {
 .topbar,
 .top-actions,
 .search-box,
-.quick-searches,
 .metrics,
 .result-toolbar,
-.section-title,
-.filter-head,
-.side-panel-header {
+.filter-head {
   display: flex;
   align-items: center;
 }
@@ -112,6 +109,7 @@ button {
   background: linear-gradient(135deg, var(--accent), var(--accent-3));
   color: #fff;
   font-weight: 900;
+  object-fit: cover;
 }
 
 .brand strong,
@@ -146,34 +144,6 @@ button {
   color: var(--text);
 }
 
-.side-panel {
-  margin-top: 22px;
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-}
-
-.side-panel-header {
-  justify-content: space-between;
-  font-size: 0.86rem;
-}
-
-.meter {
-  height: 8px;
-  margin: 14px 0;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--panel-2);
-}
-
-.meter span {
-  display: block;
-  height: 100%;
-  background: linear-gradient(90deg, var(--accent), var(--accent-3));
-}
-
-.side-panel p,
 .result-toolbar p,
 .metrics small {
   margin: 0;
@@ -307,41 +277,16 @@ h3 {
   font-size: 1.08rem;
 }
 
-.quick-searches {
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.chip,
-.facet {
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--panel);
-  color: var(--muted);
-  font-size: 0.83rem;
-}
-
-.chip {
-  padding: 8px 11px;
-}
-
-.chip:hover {
-  border-color: var(--accent);
-  color: var(--text);
-}
-
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
 
 .metrics article,
 .filters,
-.results-panel,
-.insight-card {
+.results-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: color-mix(in srgb, var(--panel) 95%, transparent);
@@ -367,31 +312,35 @@ h3 {
 
 .content-grid {
   display: grid;
-  grid-template-columns: 210px minmax(620px, 1fr) 270px;
+  grid-template-columns: 210px minmax(0, 1fr);
   gap: 12px;
   align-items: start;
 }
 
-.filters,
-.insights {
+.filters {
   position: sticky;
   top: 12px;
-}
-
-.filters,
-.insight-card {
   padding: 14px;
 }
 
 .filter-head,
-.result-toolbar,
-.section-title {
+.result-toolbar {
   justify-content: space-between;
   gap: 12px;
 }
 
 .filters label {
   margin-top: 12px;
+}
+
+.filters .checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filters .checkbox-label input[type="checkbox"] {
+  width: auto;
 }
 
 select,
@@ -417,20 +366,6 @@ input[type="range"] {
   margin-top: 6px;
   color: var(--text);
   font-size: 0.9rem;
-}
-
-.facets {
-  margin-top: 16px;
-}
-
-.facet-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.facet {
-  padding: 6px 9px;
 }
 
 .results-panel {
@@ -466,40 +401,14 @@ input[type="range"] {
   box-shadow: 0 20px 45px rgba(18, 34, 30, 0.12);
 }
 
-.product-tooltip {
-  position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: -6px;
-  z-index: 2;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(10px);
-  transition: opacity 0.2s ease, transform 0.2s ease;
-  padding: 14px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--panel) 98%, transparent);
-  border: 1px solid var(--line);
-  box-shadow: 0 20px 42px rgba(18, 34, 30, 0.08);
-}
-
-.product-card:hover .product-tooltip {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0);
-}
-
-.product-tooltip strong {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 0.95rem;
-}
-
-.product-tooltip p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.9rem;
-  line-height: 1.5;
+/* .product-card is a 3-column grid, and grid's default align-items:
+   stretch makes every column match the row's height — which is however
+   tall the long description text in the middle column makes it. Without
+   this, the thumbnail tile stretches far past its photo, leaving a large
+   patch of the gradient background (and the oversized decorative circles,
+   which are sized relative to the tile) showing beside/below the image. */
+.product-card .product-art {
+  align-self: start;
 }
 
 .product-art {
@@ -557,6 +466,10 @@ input[type="range"] {
 }
 
 .product-main p {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   margin-bottom: 8px;
   color: var(--muted);
   font-size: 0.94rem;
@@ -605,45 +518,9 @@ input[type="range"] {
 
 mark {
   border-radius: 4px;
-  background: rgba(199, 144, 16, 0.28);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
   color: inherit;
   padding: 0 2px;
-}
-
-.insights {
-  display: grid;
-  gap: 12px;
-}
-
-.section-title span {
-  border-radius: 999px;
-  padding: 5px 8px;
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
-  font-size: 0.72rem;
-  font-weight: 800;
-}
-
-.suggestions {
-  display: grid;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.suggestion {
-  border-left: 3px solid var(--accent);
-  padding-left: 10px;
-  color: var(--muted);
-  font-size: 0.88rem;
-  line-height: 1.35;
-}
-
-.activity {
-  margin: 10px 0 0;
-  padding-left: 18px;
-  color: var(--muted);
-  font-size: 0.88rem;
-  line-height: 1.35;
 }
 
 .empty-state {
@@ -657,12 +534,6 @@ mark {
 @media (max-width: 1320px) {
   .content-grid {
     grid-template-columns: 200px minmax(0, 1fr);
-  }
-
-  .insights {
-    grid-column: 1 / -1;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    position: static;
   }
 }
 
@@ -692,8 +563,7 @@ mark {
     justify-content: center;
   }
 
-  .nav-item span:last-child,
-  .side-panel {
+  .nav-item span:last-child {
     display: none;
   }
 
@@ -702,8 +572,7 @@ mark {
   }
 
   .topbar,
-  .content-grid,
-  .insights {
+  .content-grid {
     grid-template-columns: 1fr;
   }
 
@@ -875,6 +744,46 @@ mark {
   font-size: 0.92rem;
 }
 
+.custom-fields-field {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.custom-fields-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.custom-fields-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.custom-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.custom-field-row input {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.92rem;
+}
+
 .modal-error {
   margin: 12px 0 0;
   padding: 10px 12px;
@@ -889,6 +798,162 @@ mark {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 16px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Admin: order analytics calendar                                        */
+/* ---------------------------------------------------------------------- */
+
+.analytics-panel {
+  padding: 4px 0 24px;
+}
+
+.analytics-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.analytics-month-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.analytics-month-nav strong {
+  min-width: 160px;
+  text-align: center;
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  align-items: start;
+}
+
+.calendar {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  margin-bottom: 6px;
+}
+
+.calendar-weekdays span {
+  padding: 4px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.calendar-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.calendar-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.86rem;
+  cursor: default;
+}
+
+.calendar-cell-empty {
+  border: 0;
+  background: transparent;
+}
+
+.calendar-cell-has-orders {
+  border-color: #2f6fed;
+  background: #2f6fed;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.calendar-cell-has-orders:hover {
+  background: #2a63d6;
+}
+
+.calendar-cell-today {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.calendar-cell-selected {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.calendar-cell-count {
+  font-size: 0.68rem;
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+.calendar-detail {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  min-height: 200px;
+}
+
+.calendar-detail h3 {
+  margin: 0 0 10px;
+}
+
+.order-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0 4px 0 0;
+  list-style: none;
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.order-list-item {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.order-list-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.order-list-main span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.order-list-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -928,10 +993,6 @@ mark {
   min-height: 54px;
 }
 
-.shop-search .quick-searches {
-  justify-content: center;
-}
-
 .shop-result-summary {
   margin-left: auto;
   color: var(--muted);
@@ -942,6 +1003,59 @@ mark {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 22px;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 32px 0 8px;
+}
+
+.pagination-nav,
+.pagination-page {
+  display: grid;
+  place-items: center;
+  min-width: 38px;
+  height: 38px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.88rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pagination-nav:hover,
+.pagination-page:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.pagination-nav:disabled {
+  opacity: 0.4;
+  cursor: default;
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.pagination-page-active,
+.pagination-page-active:hover {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.pagination-dots {
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  height: 38px;
+  color: var(--muted);
 }
 
 .shop-card {
@@ -1009,6 +1123,17 @@ mark {
 .shop-card .product-art {
   aspect-ratio: 16 / 9;
   margin-bottom: 12px;
+}
+
+/* .shop-card .product-art (two classes) outranks the general
+   .product-art:has(img) reset below: :has()'s specificity comes from its
+   *argument* (img, a bare type selector), not from being a pseudo-class
+   itself, so it's weaker than an extra class. Without this, the fixed 16:9
+   ratio kept winning here and the photo (sized to its own aspect ratio)
+   quietly overflowed the tile and got clipped by overflow: hidden. */
+.shop-card .product-art:has(img) {
+  aspect-ratio: auto;
+  display: block;
 }
 
 .shop-card-body {
@@ -1161,6 +1286,20 @@ mark {
 .product-modal-meta .price {
   font-size: 1.5rem;
   font-weight: 900;
+}
+
+.product-modal-order {
+  margin-bottom: 16px;
+}
+
+.product-modal-order .command-button {
+  width: 100%;
+}
+
+.order-error {
+  margin-top: 8px;
+  color: var(--danger);
+  font-size: 0.86rem;
 }
 
 .product-modal-tags {
@@ -1530,9 +1669,6 @@ mark {
 }
 
 .site-footer-grid {
-  display: grid;
-  grid-template-columns: 1.4fr repeat(3, 1fr);
-  gap: 28px;
   margin-bottom: 28px;
 }
 
@@ -1549,44 +1685,11 @@ mark {
   max-width: 220px;
 }
 
-.site-footer-column {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.site-footer-column h4 {
-  margin: 0 0 2px;
-  color: var(--text);
-  font-size: 0.85rem;
-  font-weight: 800;
-}
-
-.site-footer-column a {
-  color: var(--muted);
-  font-size: 0.85rem;
-  text-decoration: none;
-}
-
-.site-footer-column a:hover {
-  color: var(--accent);
-}
-
 .site-footer-bottom {
   padding: 16px 0 28px;
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 0.8rem;
-}
-
-@media (max-width: 760px) {
-  .site-footer-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
-  .site-footer-brand {
-    grid-column: 1 / -1;
-  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1605,8 +1708,7 @@ mark {
   cursor: pointer;
 }
 
-.product-side,
-.product-tooltip {
+.product-side {
   position: relative;
   z-index: 2;
 }
@@ -1634,25 +1736,6 @@ mark {
   color: var(--muted);
   font-size: 0.9rem;
   line-height: 1.5;
-}
-
-/* ---------------------------------------------------------------------- */
-/* Collapsing quick-search chip row (matches header compact state)        */
-/* ---------------------------------------------------------------------- */
-
-.quick-searches-row {
-  justify-content: center;
-  max-height: 44px;
-  opacity: 1;
-  overflow: hidden;
-  transition: max-height 0.2s ease, opacity 0.15s ease, margin 0.2s ease;
-}
-
-.quick-searches-collapsed {
-  max-height: 0;
-  opacity: 0;
-  margin: 0;
-  pointer-events: none;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1767,13 +1850,52 @@ mark {
 }
 
 /* Real product photos fill the same tile the icon gradient used to; the
-   gradient background stays visible behind transparent PNGs. */
+   gradient background stays visible behind transparent PNGs and around any
+   photo whose aspect ratio doesn't match the tile (object-fit: contain
+   keeps the whole photo visible instead of cropping it). .product-art is a
+   grid container (for the small centered icon fallback) whose implicit row
+   track sizes itself from a replaced child's intrinsic aspect ratio instead
+   of the container's own aspect-ratio-derived height, so a 100%-tall <img>
+   grid item ends up taller than the tile and gets clipped by overflow:
+   hidden. Taking the image out of grid flow with absolute positioning (the
+   tile already has position: relative) sizes it directly from the tile's
+   real box instead, so it stays fully inside it. */
 .product-art img,
 .product-modal-art img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   border-radius: inherit;
+}
+
+/* Every fixed-ratio tile above (card grid 16:9, admin list 1:1, modal
+   16:8) exists for the icon + color-gradient placeholder shown when a
+   product has no photo. The moment a real photo exists, drop the forced
+   ratio and size the tile from the photo itself instead — a fixed ratio
+   that doesn't match the photo always leaves either cropped content or
+   background-color bars down the sides. This wins the cascade over all
+   three fixed-ratio rules above since it's declared after them. */
+.product-art:has(img) {
+  display: block;
+  aspect-ratio: auto;
+}
+
+.product-art:has(img) img {
+  position: static;
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* ::before/::after are the decorative circles for the icon-only placeholder
+   tile. They're position: absolute, so without this they'd still paint (and
+   catch clicks) on top of a real photo once one exists — leaving a
+   translucent patch that blocks clicking that part of the image. */
+.product-art:has(img)::before,
+.product-art:has(img)::after {
+  display: none;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1832,6 +1954,21 @@ mark {
 
 .gallery-dots span.gallery-dot-active {
   background: #fff;
+}
+
+/* Click the modal's main product photo to zoom in ~2.2x anchored on the
+   click point; moving the mouse while zoomed pans the magnified view by
+   shifting transform-origin, then a second click zooms back out. Scales
+   within the same tile (which already clips via overflow: hidden) rather
+   than opening a separate full-screen view. */
+.product-modal-art .zoomable-image {
+  cursor: zoom-in;
+  transition: transform 0.2s ease;
+}
+
+.product-modal-art .zoomable-image-zoomed {
+  transform: scale(2.2);
+  cursor: zoom-out;
 }
 
 .shop-card-badges {

@@ -11,9 +11,9 @@ export default function Header({ t, lang, onLangChange, currency, onCurrencyChan
           onHome();
         }}
       >
-        <span className="brand-mark">A</span>
+        <img className="brand-mark" src="/picsart-logo.jpeg" alt="Picsart" />
         <div className="brand-copy">
-          <strong>Atlas</strong>
+          <strong>Picsart Shop</strong>
           <span>{t.tagline}</span>
         </div>
       </a>

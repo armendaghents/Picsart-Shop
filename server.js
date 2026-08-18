@@ -8,7 +8,7 @@ import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { openDatabase } from "./db/init.js";
+import { openDatabase } from "./db/init.js"
 import {
   buildFtsQuery,
   expandTerms,
@@ -102,14 +102,30 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(express.json());
 
+// ---------------------------------------------------------------------------
+// Request logging — logs every request's method, path, status code, and
+// duration once it finishes. Kept dependency-free (no morgan) so it's easy
+// to swap out later.
+// ---------------------------------------------------------------------------
+app.use((request, response, next) => {
+  const start = Date.now();
+  response.on("finish", () => {
+    const ms = Date.now() - start;
+    console.log(`${request.method} ${request.originalUrl} ${response.statusCode} ${ms}ms`);
+  });
+  next();
+});
+
 app.post("/api/admin/login", (request, response) => {
   const { password } = request.body || {};
   if (typeof password === "string" && password.length && password === ADMIN_PASSWORD) {
     const token = crypto.randomBytes(24).toString("hex");
     sessions.set(token, Date.now() + SESSION_MAX_AGE_MS);
     setSessionCookie(response, token);
+    console.log(`[auth] admin login succeeded from ${request.ip}`);
     return response.json({ ok: true });
   }
+  console.warn(`[auth] admin login failed from ${request.ip}`);
   response.status(401).json({ ok: false, message: "Incorrect password." });
 });
 
@@ -117,6 +133,7 @@ app.post("/api/admin/logout", (request, response) => {
   const cookies = parseCookies(request.headers.cookie);
   if (cookies[SESSION_COOKIE]) sessions.delete(cookies[SESSION_COOKIE]);
   clearSessionCookie(response);
+  console.log(`[auth] admin logout from ${request.ip}`);
   response.json({ ok: true });
 });
 
@@ -137,7 +154,7 @@ function serveAdmin(request, response) {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Atlas — Admin Login</title>
+    <title>PicsArt Shop — Admin Login</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -193,6 +210,16 @@ function safeJsonArray(value) {
   }
 }
 
+// Admin-defined per-item spec rows (e.g. "Warranty" -> "2 years") that don't
+// fit the fixed columns. Stored as a JSON array of {key, value} pairs so
+// order is preserved and duplicate-ish keys across items aren't a schema change.
+function normalizeCustomFields(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => ({ key: String(entry?.key ?? "").trim(), value: String(entry?.value ?? "").trim() }))
+    .filter((entry) => entry.key);
+}
+
 // Below this row count we score every row in JS (which includes Levenshtein
 // typo tolerance) instead of pre-filtering with FTS. FTS prefix matching
 // alone can't catch a misspelling like "gamign" -> "gaming", so at
@@ -242,17 +269,17 @@ function baseSelect() {
       i.id, i.external_id, i.sku, i.barcode, i.serial_number, i.name, i.brand, i.model,
       i.status, i.condition, i.quantity, i.reserved_quantity, i.reorder_point,
       i.purchase_price, i.selling_price, i.currency, i.description, i.ocr_text,
-      i.icon, i.images, i.colors, i.tags, i.added_at, i.updated_at,
+      i.icon, i.images, i.colors, i.tags, i.custom_fields, i.added_at, i.updated_at,
       c.path AS category_path, w.name AS warehouse_name, l.code AS location_code
     FROM inventory_items i
     JOIN categories c ON c.id = i.category_id
-    JOIN warehouses w ON w.id = i.warehouse_id
-    JOIN locations l ON l.id = i.location_id
+    LEFT JOIN warehouses w ON w.id = i.warehouse_id
+    LEFT JOIN locations l ON l.id = i.location_id
     WHERE i.deleted_at IS NULL
   `;
 }
 
-function loadFilteredRows({ category = "All", warehouse = "All", status = "All", minPrice = 0, maxPrice = Infinity }) {
+function loadFilteredRows({ category = "All", warehouse = "All", status = "All", model = "All", minPrice = 0, maxPrice = Infinity }) {
   const clauses = [];
   const params = [];
 
@@ -267,6 +294,10 @@ function loadFilteredRows({ category = "All", warehouse = "All", status = "All",
   if (status !== "All") {
     clauses.push("i.status = ?");
     params.push(status);
+  }
+  if (model !== "All") {
+    clauses.push("i.model = ?");
+    params.push(model);
   }
   if (minPrice > 0) {
     clauses.push("i.selling_price >= ?");
@@ -315,15 +346,16 @@ function toDomainItem(row) {
     colors: colors.length ? colors : ["#c98a4b", "#8a6a3f"],
     tags,
     tagsText: tags.join(" "),
+    customFields: safeJsonArray(row.custom_fields),
     addedAt: row.added_at,
     category_path: row.category_path,
     ocr_text: row.ocr_text,
   };
 }
 
-function search({ q = "", category = "All", warehouse = "All", status = "All", minPrice = 0, maxPrice = Infinity, sort = "relevance", limit = 100 }) {
+function search({ q = "", category = "All", warehouse = "All", status = "All", model = "All", minPrice = 0, maxPrice = Infinity, sort = "relevance", limit = 100 }) {
   const candidateIds = findCandidateIds(q);
-  let rows = loadFilteredRows({ category, warehouse, status, minPrice, maxPrice });
+  let rows = loadFilteredRows({ category, warehouse, status, model, minPrice, maxPrice });
   if (candidateIds) rows = rows.filter((row) => candidateIds.has(row.id));
 
   let items = rows.map((row) => {
@@ -368,15 +400,24 @@ app.get("/api/health", (_request, response) => {
 // Admin inventory API — full internal detail (cost, reserved qty, notes, etc.)
 // ---------------------------------------------------------------------------
 app.get("/api/inventory", requireAdmin, (request, response) => {
-  const { q = "", category = "All", warehouse = "All", status = "All", sort = "relevance" } = request.query;
-  const maxPrice = parseNumber(request.query.maxPrice, 10000);
-  const limit = Math.min(parseNumber(request.query.limit, 50), 200);
+  const { q = "", category = "All", warehouse = "All", status = "All", model = "All", sort = "relevance" } = request.query;
+  const maxPrice = request.query.maxPrice === "Infinity" ? Infinity : parseNumber(request.query.maxPrice, 10000);
+  const page = Math.max(1, Math.trunc(parseNumber(request.query.page, 1)));
+  const pageSize = Math.min(Math.max(1, Math.trunc(parseNumber(request.query.pageSize, 50))), 200);
 
   try {
-    const items = search({ q, category, warehouse, status, maxPrice, sort, limit });
-    recordSearchEvent(q, "admin", items.length);
-    response.json({ items });
+    const items = search({ q, category, warehouse, status, model, maxPrice, sort, limit: 100000 });
+
+    const total = items.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const currentPage = Math.min(page, totalPages);
+    const start = (currentPage - 1) * pageSize;
+    const pageItems = items.slice(start, start + pageSize);
+
+    recordSearchEvent(q, "admin", total);
+    response.json({ items: pageItems, total, page: currentPage, pageSize, totalPages });
   } catch (error) {
+    console.error("[inventory] search failed:", error);
     response.status(500).json({ error: "inventory_search_failed", message: error.message });
   }
 });
@@ -384,11 +425,13 @@ app.get("/api/inventory", requireAdmin, (request, response) => {
 app.post("/api/admin/upload", requireAdmin, (request, response) => {
   upload.single("image")(request, response, (error) => {
     if (error) {
+      console.error("[upload] single upload failed:", error);
       return response.status(400).json({ error: "upload_failed", message: error.message });
     }
     if (!request.file) {
       return response.status(400).json({ error: "upload_failed", message: "No image file received (jpg/png/webp/gif, up to 5MB)." });
     }
+    console.log(`[upload] saved ${request.file.filename}`);
     response.json({ url: `/uploads/${request.file.filename}` });
   });
 });
@@ -396,18 +439,38 @@ app.post("/api/admin/upload", requireAdmin, (request, response) => {
 app.post("/api/admin/upload-multiple", requireAdmin, (request, response) => {
   upload.array("images", 10)(request, response, (error) => {
     if (error) {
+      console.error("[upload] multi upload failed:", error);
       return response.status(400).json({ error: "upload_failed", message: error.message });
     }
     if (!request.files || !request.files.length) {
       return response.status(400).json({ error: "upload_failed", message: "No image files received (jpg/png/webp/gif, up to 5MB each)." });
     }
+    console.log(`[upload] saved ${request.files.length} files`);
     response.json({ urls: request.files.map((file) => `/uploads/${file.filename}`) });
+  });
+});
+
+// Best-effort cleanup for a photo uploaded to an in-progress "Add Item" draft
+// that gets removed before the item is ever saved (so it's definitely orphaned).
+app.delete("/api/admin/upload", requireAdmin, (request, response) => {
+  const { url } = request.body || {};
+  if (typeof url !== "string" || !/^\/uploads\/[a-zA-Z0-9._-]+$/.test(url)) {
+    return response.status(400).json({ error: "validation_failed", message: "Invalid upload url." });
+  }
+
+  const filePath = path.join(UPLOADS_DIR, path.basename(url));
+  fs.unlink(filePath, (error) => {
+    if (error && error.code !== "ENOENT") {
+      console.error("[upload] delete failed:", error);
+      return response.status(500).json({ error: "delete_failed", message: error.message });
+    }
+    response.json({ ok: true });
   });
 });
 
 app.post("/api/inventory", requireAdmin, (request, response) => {
   const body = request.body || {};
-  const required = ["sku", "name", "category", "warehouse", "location"];
+  const required = ["sku", "name", "category"];
   const missing = required.filter((field) => !body[field]);
   if (missing.length) {
     return response.status(400).json({ error: "validation_failed", message: `Missing fields: ${missing.join(", ")}` });
@@ -415,8 +478,8 @@ app.post("/api/inventory", requireAdmin, (request, response) => {
 
   try {
     const categoryId = upsertLookupByPath(body.category);
-    const warehouseId = upsertLookup("warehouses", body.warehouse);
-    const locationId = upsertLocation(warehouseId, body.location);
+    const warehouseId = body.warehouse ? upsertLookup("warehouses", body.warehouse) : null;
+    const locationId = warehouseId && body.location ? upsertLocation(warehouseId, body.location) : null;
 
     const quantity = Math.max(0, parseNumber(body.quantity, 0));
     const reserved = Math.max(0, parseNumber(body.reserved, 0));
@@ -427,8 +490,8 @@ app.post("/api/inventory", requireAdmin, (request, response) => {
         `INSERT INTO inventory_items (
           external_id, sku, barcode, serial_number, name, brand, model,
           category_id, warehouse_id, location_id, status, condition, quantity, reserved_quantity, reorder_point,
-          purchase_price, selling_price, currency, description, ocr_text, icon, images, colors, tags
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          purchase_price, selling_price, currency, description, ocr_text, icon, images, colors, tags, custom_fields
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
         body.externalId || `ITM-${Date.now()}`,
@@ -454,18 +517,21 @@ app.post("/api/inventory", requireAdmin, (request, response) => {
         body.icon || body.name.slice(0, 2).toUpperCase(),
         JSON.stringify(body.images || []),
         JSON.stringify(body.colors || ["#c98a4b", "#8a6a3f"]),
-        JSON.stringify(body.tags || [])
+        JSON.stringify(body.tags || []),
+        JSON.stringify(normalizeCustomFields(body.customFields))
       );
 
     const id = Number(info.lastInsertRowid);
     const row = db.prepare(`SELECT tags, ocr_text, description, name, brand, model, sku, barcode, serial_number FROM inventory_items WHERE id = ?`).get(id);
     reindexItem(id, { ...row, category_path: body.category });
 
+    console.log(`[inventory] created item ${body.sku} (id ${id})`);
     response.status(201).json({ ok: true, id });
   } catch (error) {
     const message = /UNIQUE constraint failed/.test(error.message)
       ? "An item with that SKU already exists."
       : error.message;
+    console.error(`[inventory] create failed for sku ${body.sku}:`, error);
     response.status(400).json({ error: "create_failed", message });
   }
 });
@@ -483,7 +549,7 @@ app.get("/api/inventory/:id", requireAdmin, (request, response) => {
 
 app.put("/api/inventory/:id", requireAdmin, (request, response) => {
   const body = request.body || {};
-  const required = ["sku", "name", "category", "warehouse", "location"];
+  const required = ["sku", "name", "category"];
   const missing = required.filter((field) => !body[field]);
   if (missing.length) {
     return response.status(400).json({ error: "validation_failed", message: `Missing fields: ${missing.join(", ")}` });
@@ -496,8 +562,8 @@ app.put("/api/inventory/:id", requireAdmin, (request, response) => {
 
   try {
     const categoryId = upsertLookupByPath(body.category);
-    const warehouseId = upsertLookup("warehouses", body.warehouse);
-    const locationId = upsertLocation(warehouseId, body.location);
+    const warehouseId = body.warehouse ? upsertLookup("warehouses", body.warehouse) : null;
+    const locationId = warehouseId && body.location ? upsertLocation(warehouseId, body.location) : null;
 
     const quantity = Math.max(0, parseNumber(body.quantity, 0));
     const reserved = Math.max(0, parseNumber(body.reserved, 0));
@@ -509,7 +575,7 @@ app.put("/api/inventory/:id", requireAdmin, (request, response) => {
         category_id = ?, warehouse_id = ?, location_id = ?, status = ?, condition = ?,
         quantity = ?, reserved_quantity = ?, reorder_point = ?,
         purchase_price = ?, selling_price = ?, currency = ?, description = ?, ocr_text = ?,
-        icon = ?, images = ?, colors = ?, tags = ?, updated_at = datetime('now')
+        icon = ?, images = ?, colors = ?, tags = ?, custom_fields = ?, updated_at = datetime('now')
       WHERE id = ?`
     ).run(
       body.sku,
@@ -535,6 +601,7 @@ app.put("/api/inventory/:id", requireAdmin, (request, response) => {
       JSON.stringify(body.images || []),
       JSON.stringify(body.colors || ["#c98a4b", "#8a6a3f"]),
       JSON.stringify(body.tags || []),
+      JSON.stringify(normalizeCustomFields(body.customFields)),
       existing.id
     );
 
@@ -551,11 +618,13 @@ app.put("/api/inventory/:id", requireAdmin, (request, response) => {
       category_path: body.category,
     });
 
+    console.log(`[inventory] updated item ${body.sku} (id ${existing.id})`);
     response.json({ ok: true, id: existing.id });
   } catch (error) {
     const message = /UNIQUE constraint failed/.test(error.message)
       ? "An item with that SKU already exists."
       : error.message;
+    console.error(`[inventory] update failed for id ${existing.id}:`, error);
     response.status(400).json({ error: "update_failed", message });
   }
 });
@@ -569,6 +638,7 @@ app.delete("/api/inventory/:id", requireAdmin, (request, response) => {
   db.prepare(`UPDATE inventory_items SET deleted_at = datetime('now') WHERE id = ?`).run(existing.id);
   db.prepare(`DELETE FROM inventory_fts WHERE rowid = ?`).run(existing.id);
 
+  console.log(`[inventory] deleted item id ${existing.id}`);
   response.json({ ok: true });
 });
 
@@ -600,16 +670,55 @@ function reindexItem(id, row) {
   ).run(id, row.name || "", row.brand || "", row.model || "", row.sku || "", row.barcode || "", row.serial_number || "", tags, row.ocr_text || "", row.description || "", row.category_path || "");
 }
 
-app.get("/api/facets", requireAdmin, (_request, response) => {
+app.get("/api/facets", requireAdmin, (request, response) => {
+  const { category = "All" } = request.query;
   try {
-    const categories = db.prepare("SELECT DISTINCT path FROM categories ORDER BY path").all().map((r) => r.path);
-    const warehouses = db.prepare("SELECT DISTINCT name FROM warehouses ORDER BY name").all().map((r) => r.name);
+    // Scoped to categories/warehouses actually used by a live item, so a
+    // category left behind by a deleted item doesn't linger in the dropdown.
+    const categories = db
+      .prepare(
+        `SELECT DISTINCT c.path FROM categories c
+         JOIN inventory_items i ON i.category_id = c.id
+         WHERE i.deleted_at IS NULL
+         ORDER BY c.path`
+      )
+      .all()
+      .map((r) => r.path);
+    const warehouses = db
+      .prepare(
+        `SELECT DISTINCT w.name FROM warehouses w
+         JOIN inventory_items i ON i.warehouse_id = w.id
+         WHERE i.deleted_at IS NULL
+         ORDER BY w.name`
+      )
+      .all()
+      .map((r) => r.name);
     const statuses = db
       .prepare("SELECT DISTINCT status FROM inventory_items WHERE deleted_at IS NULL ORDER BY status")
       .all()
       .map((r) => r.status);
-    response.json({ categories, warehouses, statuses });
+
+    // Scoped to the selected category so the model list stays relevant
+    // (e.g. picking "Camera" only offers camera models, not every model in the catalog).
+    const modelClauses = ["i.deleted_at IS NULL", "i.model IS NOT NULL", "i.model != ''"];
+    const modelParams = [];
+    if (category !== "All") {
+      modelClauses.push("c.path LIKE ?");
+      modelParams.push(`${category}%`);
+    }
+    const models = db
+      .prepare(
+        `SELECT DISTINCT i.model FROM inventory_items i
+         JOIN categories c ON c.id = i.category_id
+         WHERE ${modelClauses.join(" AND ")}
+         ORDER BY i.model`
+      )
+      .all(...modelParams)
+      .map((r) => r.model);
+
+    response.json({ categories, warehouses, statuses, models });
   } catch (error) {
+    console.error("[facets] failed:", error);
     response.status(500).json({ error: "facets_failed", message: error.message });
   }
 });
@@ -630,6 +739,7 @@ app.get("/api/dashboard", requireAdmin, (_request, response) => {
     const searches = db.prepare(`SELECT COUNT(*) AS count FROM search_events`).get();
     response.json({ ...row, total_searches: searches.count });
   } catch (error) {
+    console.error("[dashboard] failed:", error);
     response.status(500).json({ error: "dashboard_failed", message: error.message });
   }
 });
@@ -667,21 +777,28 @@ app.get("/api/shop/products", (request, response) => {
   const { q = "", category = "All", sort = "relevance" } = request.query;
   const minPrice = parseNumber(request.query.minPrice, 0);
   const maxPrice = parseNumber(request.query.maxPrice, 100000);
-  const limit = Math.min(parseNumber(request.query.limit, 60), 200);
+  const page = Math.max(1, Math.trunc(parseNumber(request.query.page, 1)));
+  const pageSize = Math.min(Math.max(1, Math.trunc(parseNumber(request.query.pageSize, 24))), 100);
   const inStockOnly = request.query.inStockOnly === "true";
 
   const sellableStatuses = new Set(["Available", "Low Stock", "Reserved", "Out of Stock"]);
 
   try {
-    let items = search({ q, category, warehouse: "All", status: "All", minPrice, maxPrice, sort, limit: 500 }).filter(
+    let items = search({ q, category, warehouse: "All", status: "All", minPrice, maxPrice, sort, limit: 100000 }).filter(
       (item) => sellableStatuses.has(item.status)
     );
     if (inStockOnly) items = items.filter((item) => item.availableQuantity > 0);
-    items = items.slice(0, limit);
 
-    recordSearchEvent(q, "shop", items.length);
-    response.json({ items: items.map(toShopItem) });
+    const total = items.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const currentPage = Math.min(page, totalPages);
+    const start = (currentPage - 1) * pageSize;
+    const pageItems = items.slice(start, start + pageSize);
+
+    recordSearchEvent(q, "shop", total);
+    response.json({ items: pageItems.map(toShopItem), total, page: currentPage, pageSize, totalPages });
   } catch (error) {
+    console.error("[shop] search failed:", error);
     response.status(500).json({ error: "shop_search_failed", message: error.message });
   }
 });
@@ -705,6 +822,7 @@ app.get("/api/shop/suggest", (request, response) => {
       }));
     response.json({ items });
   } catch (error) {
+    console.error("[shop] suggest failed:", error);
     response.status(500).json({ error: "suggest_failed", message: error.message });
   }
 });
@@ -718,6 +836,47 @@ app.get("/api/shop/products/:id", (request, response) => {
   const item = toDomainItem(row);
   item.score = 50;
   response.json(toShopItem(item));
+});
+
+// One-click "Order" from the storefront: no cart, no customer info — just
+// records the order and takes one unit off the shelf like a real sale.
+app.post("/api/shop/orders", (request, response) => {
+  const { itemId } = request.body || {};
+  if (!itemId) {
+    return response.status(400).json({ error: "validation_failed", message: "Missing itemId." });
+  }
+
+  const row = db
+    .prepare(
+      `SELECT i.id, i.sku, i.name, i.brand, i.model, i.quantity, i.reserved_quantity, i.selling_price, c.path AS category_path
+       FROM inventory_items i
+       JOIN categories c ON c.id = i.category_id
+       WHERE i.external_id = ? AND i.deleted_at IS NULL`
+    )
+    .get(itemId);
+  if (!row) {
+    return response.status(404).json({ error: "not_found", message: "Product not found." });
+  }
+  if (row.quantity - row.reserved_quantity <= 0) {
+    return response.status(400).json({ error: "out_of_stock", message: "This item is currently out of stock." });
+  }
+
+  try {
+    db.prepare(`UPDATE inventory_items SET quantity = quantity - 1, updated_at = datetime('now') WHERE id = ?`).run(row.id);
+    db.prepare(
+      `INSERT INTO orders (inventory_item_id, sku, name, brand, model, category, quantity, price) VALUES (?,?,?,?,?,?,?,?)`
+    ).run(row.id, row.sku, row.name, row.brand, row.model, row.category_path, 1, row.selling_price);
+
+    const updatedRow = db.prepare(`${baseSelect()} AND i.external_id = ?`).get(itemId);
+    updatedRow.tagsText = safeJsonArray(updatedRow.tags).join(" ");
+    const updatedItem = toDomainItem(updatedRow);
+    updatedItem.score = 50;
+
+    response.status(201).json({ ok: true, item: toShopItem(updatedItem) });
+  } catch (error) {
+    console.error("[shop] order failed:", error);
+    response.status(500).json({ error: "order_failed", message: error.message });
+  }
 });
 
 app.get("/api/shop/facets", (_request, response) => {
@@ -740,12 +899,76 @@ app.get("/api/shop/facets", (_request, response) => {
       .get();
     response.json({ categories, minPrice: priceBounds.minPrice, maxPrice: priceBounds.maxPrice });
   } catch (error) {
+    console.error("[shop] facets failed:", error);
     response.status(500).json({ error: "shop_facets_failed", message: error.message });
   }
 });
 
+// ---------------------------------------------------------------------------
+// Admin analytics — order calendar
+// ---------------------------------------------------------------------------
+const MONTH_PATTERN = /^\d{4}-\d{2}$/;
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+// ordered_at is stored in UTC. The admin's browser reports its own offset
+// (minutes to ADD to UTC to get local time, i.e. -Date#getTimezoneOffset())
+// so "which calendar day is this order on" matches the admin's local day
+// instead of the UTC day, which otherwise disagree near midnight.
+function tzModifier(request) {
+  const raw = Math.trunc(parseNumber(request.query.tzOffset, 0));
+  const clamped = Math.max(-840, Math.min(840, raw)); // real-world offsets span -12:00..+14:00
+  return `${clamped >= 0 ? "+" : ""}${clamped} minutes`;
+}
+
+app.get("/api/analytics/orders/summary", requireAdmin, (request, response) => {
+  const { month } = request.query;
+  if (!MONTH_PATTERN.test(month || "")) {
+    return response.status(400).json({ error: "validation_failed", message: "month must be YYYY-MM." });
+  }
+
+  try {
+    const modifier = tzModifier(request);
+    const rows = db
+      .prepare(
+        `SELECT date(ordered_at, ?) AS day, COUNT(*) AS count
+         FROM orders
+         WHERE strftime('%Y-%m', ordered_at, ?) = ?
+         GROUP BY day`
+      )
+      .all(modifier, modifier, month);
+    const days = Object.fromEntries(rows.map((row) => [row.day, row.count]));
+    response.json({ days });
+  } catch (error) {
+    console.error("[analytics] order summary failed:", error);
+    response.status(500).json({ error: "analytics_failed", message: error.message });
+  }
+});
+
+app.get("/api/analytics/orders/day", requireAdmin, (request, response) => {
+  const { date } = request.query;
+  if (!DATE_PATTERN.test(date || "")) {
+    return response.status(400).json({ error: "validation_failed", message: "date must be YYYY-MM-DD." });
+  }
+
+  try {
+    const modifier = tzModifier(request);
+    const rows = db
+      .prepare(
+        `SELECT id, sku, name, brand, model, category, quantity, price, ordered_at AS orderedAt
+         FROM orders
+         WHERE date(ordered_at, ?) = ?
+         ORDER BY ordered_at DESC`
+      )
+      .all(modifier, date);
+    response.json({ orders: rows });
+  } catch (error) {
+    console.error("[analytics] order day lookup failed:", error);
+    response.status(500).json({ error: "analytics_failed", message: error.message });
+  }
+});
+
 app.listen(port, () => {
-  console.log(`Atlas Search running on http://localhost:${port}`);
+  console.log(`PicsArt Shop running on http://localhost:${port}`);
   console.log(`  Storefront:     http://localhost:${port}/index.html`);
   console.log(`  Admin console:  http://localhost:${port}/admin.html`);
 });

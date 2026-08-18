@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { createItem, updateItem, uploadImages } from "../api";
+import { createItem, updateItem, uploadImages, deleteUploadedImage } from "../api";
 
 const STATUS_OPTIONS = ["Available", "Low Stock", "Reserved", "Out of Stock", "In Repair", "Archived"];
 const CONDITION_OPTIONS = ["New", "Used"];
@@ -24,7 +24,19 @@ const BLANK_FORM = {
   tags: "",
   description: "",
   images: [],
+  customFields: [],
 };
+
+const ADD_DRAFT_KEY = "atlasAddItemDraft";
+
+function loadAddDraft() {
+  try {
+    const raw = sessionStorage.getItem(ADD_DRAFT_KEY);
+    return raw ? { ...BLANK_FORM, ...JSON.parse(raw) } : BLANK_FORM;
+  } catch {
+    return BLANK_FORM;
+  }
+}
 
 function itemToForm(item) {
   return {
@@ -47,20 +59,32 @@ function itemToForm(item) {
     tags: (item.tags || []).join(", "),
     description: item.description || "",
     images: item.images || [],
+    customFields: item.customFields && item.customFields.length ? item.customFields : [],
   };
 }
 
 export default function ItemFormModal({ mode, item, onClose, onSaved }) {
-  const [form, setForm] = useState(item ? itemToForm(item) : BLANK_FORM);
+  const [form, setForm] = useState(item ? itemToForm(item) : loadAddDraft());
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
-    setForm(item ? itemToForm(item) : BLANK_FORM);
+    setForm(item ? itemToForm(item) : loadAddDraft());
     setError("");
   }, [item, mode]);
+
+  // Keep an in-progress "add item" draft in sessionStorage so closing the
+  // modal (X / Cancel) without saving doesn't lose what was typed.
+  useEffect(() => {
+    if (mode !== "add") return;
+    try {
+      sessionStorage.setItem(ADD_DRAFT_KEY, JSON.stringify(form));
+    } catch {
+      // sessionStorage unavailable (e.g. private browsing) — draft just won't persist.
+    }
+  }, [form, mode]);
 
   function update(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -91,7 +115,30 @@ export default function ItemFormModal({ mode, item, onClose, onSaved }) {
   }
 
   function removePhoto(index) {
+    // In "add" mode the item doesn't exist yet, so an uploaded photo removed
+    // here is definitely orphaned — clean it up. In "edit" mode the removal
+    // is only provisional until Save, so the original item keeps its photo
+    // unless and until the edit is actually saved.
+    if (mode === "add") {
+      const url = form.images[index];
+      if (url) deleteUploadedImage(url).catch(() => {});
+    }
     setForm((current) => ({ ...current, images: current.images.filter((_, i) => i !== index) }));
+  }
+
+  function addCustomField() {
+    setForm((current) => ({ ...current, customFields: [...current.customFields, { key: "", value: "" }] }));
+  }
+
+  function updateCustomField(index, field, value) {
+    setForm((current) => ({
+      ...current,
+      customFields: current.customFields.map((entry, i) => (i === index ? { ...entry, [field]: value } : entry)),
+    }));
+  }
+
+  function removeCustomField(index) {
+    setForm((current) => ({ ...current, customFields: current.customFields.filter((_, i) => i !== index) }));
   }
 
   async function handleSubmit(event) {
@@ -102,6 +149,7 @@ export default function ItemFormModal({ mode, item, onClose, onSaved }) {
     const payload = {
       ...form,
       tags: form.tags ? form.tags.split(",").map((tag) => tag.trim()).filter(Boolean) : [],
+      customFields: form.customFields.filter((entry) => entry.key.trim()),
     };
 
     try {
@@ -109,6 +157,11 @@ export default function ItemFormModal({ mode, item, onClose, onSaved }) {
         await updateItem(item.id, payload);
       } else {
         await createItem(payload);
+        try {
+          sessionStorage.removeItem(ADD_DRAFT_KEY);
+        } catch {
+          // ignore
+        }
       }
       onSaved();
     } catch (submitError) {
@@ -196,11 +249,11 @@ export default function ItemFormModal({ mode, item, onClose, onSaved }) {
           </label>
           <label>
             Warehouse
-            <input value={form.warehouse} onChange={(e) => update("warehouse", e.target.value)} required placeholder="e.g. West Hub" />
+            <input value={form.warehouse} onChange={(e) => update("warehouse", e.target.value)} placeholder="optional" />
           </label>
           <label>
             Location code
-            <input value={form.location} onChange={(e) => update("location", e.target.value)} required placeholder="e.g. A-01-01" />
+            <input value={form.location} onChange={(e) => update("location", e.target.value)} placeholder="optional" />
           </label>
           <label>
             Status
@@ -246,6 +299,40 @@ export default function ItemFormModal({ mode, item, onClose, onSaved }) {
             Description
             <textarea rows="2" value={form.description} onChange={(e) => update("description", e.target.value)} placeholder="Customer-facing description" />
           </label>
+        </div>
+
+        <div className="custom-fields-field">
+          <div className="custom-fields-head">
+            <span>Custom fields</span>
+            <button type="button" className="text-button" onClick={addCustomField}>
+              + Add field
+            </button>
+          </div>
+          {form.customFields.length ? (
+            <div className="custom-fields-list">
+              {form.customFields.map((entry, index) => (
+                <div className="custom-field-row" key={index}>
+                  <input
+                    value={entry.key}
+                    onChange={(e) => updateCustomField(index, "key", e.target.value)}
+                    placeholder="e.g. Warranty"
+                  />
+                  <input
+                    value={entry.value}
+                    onChange={(e) => updateCustomField(index, "value", e.target.value)}
+                    placeholder="e.g. 2 years"
+                  />
+                  <button type="button" className="icon-button subtle" onClick={() => removeCustomField(index)} title="Remove field">
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="image-upload-hint">
+              Add a field for anything specific to this product that isn't covered above (e.g. Warranty, Voltage, Material).
+            </p>
+          )}
         </div>
 
         {error && <p className="modal-error">{error}</p>}

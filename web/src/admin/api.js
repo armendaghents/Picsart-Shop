@@ -13,8 +13,22 @@ export function fetchDashboard() {
   return request("/api/dashboard");
 }
 
-export function fetchFacets() {
-  return request("/api/facets");
+export function fetchFacets(category = "All") {
+  return request(`/api/facets?category=${encodeURIComponent(category)}`);
+}
+
+// Minutes to ADD to UTC to get this browser's local time, so the server can
+// bucket orders into the admin's local calendar day instead of the UTC day.
+function localTzOffset() {
+  return -new Date().getTimezoneOffset();
+}
+
+export function fetchOrderSummary(month) {
+  return request(`/api/analytics/orders/summary?month=${encodeURIComponent(month)}&tzOffset=${localTzOffset()}`);
+}
+
+export function fetchOrdersForDay(date) {
+  return request(`/api/analytics/orders/day?date=${encodeURIComponent(date)}&tzOffset=${localTzOffset()}`);
 }
 
 export function fetchInventory(params) {
@@ -54,6 +68,14 @@ export function uploadImages(files) {
   const formData = new FormData();
   for (const file of files) formData.append("images", file);
   return request("/api/admin/upload-multiple", { method: "POST", body: formData });
+}
+
+export function deleteUploadedImage(url) {
+  return request("/api/admin/upload", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
 }
 
 export function deleteItem(id) {

@@ -1,45 +1,43 @@
-export default function Sidebar({ resultCount }) {
-  const healthScore = 98;
-
+export default function Sidebar({ activeView, onNavigate }) {
   return (
     <aside className="sidebar" aria-label="Primary navigation">
       <a className="brand" href="/">
-        <span className="brand-mark">A</span>
+        <img className="brand-mark" src="/picsart-logo.jpeg" alt="Picsart" />
         <div>
-          <strong>Atlas Search</strong>
+          <strong>Picsart Shop</strong>
           <span>Admin Console</span>
         </div>
       </a>
 
       <nav className="nav">
-        <button className="nav-item active" type="button" title="Search">
+        <button
+          className={`nav-item${activeView === "search" ? " active" : ""}`}
+          type="button"
+          title="Search"
+          onClick={() => onNavigate("search")}
+        >
           <span>⌕</span>
           <span>Search</span>
         </button>
-        <button className="nav-item" type="button" title="Inventory">
+        <button
+          className={`nav-item${activeView === "search" ? " active" : ""}`}
+          type="button"
+          title="Inventory"
+          onClick={() => onNavigate("search")}
+        >
           <span>▦</span>
           <span>Inventory</span>
         </button>
-        <button className="nav-item" type="button" title="Warehouses">
-          <span>⌂</span>
-          <span>Warehouses</span>
-        </button>
-        <button className="nav-item" type="button" title="Analytics">
+        <button
+          className={`nav-item${activeView === "analytics" ? " active" : ""}`}
+          type="button"
+          title="Analytics"
+          onClick={() => onNavigate("analytics")}
+        >
           <span>◷</span>
           <span>Analytics</span>
         </button>
       </nav>
-
-      <section className="side-panel">
-        <div className="side-panel-header">
-          <span>Search Health</span>
-          <strong>{healthScore}%</strong>
-        </div>
-        <div className="meter">
-          <span style={{ width: `${healthScore}%` }} />
-        </div>
-        <p>Hybrid ranking, typo tolerance, synonyms, and field boosting enabled. {resultCount} items indexed.</p>
-      </section>
     </aside>
   );
 }

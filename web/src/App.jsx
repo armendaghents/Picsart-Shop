@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Header from "./components/Header";
 import SearchBar from "./components/SearchBar";
 import FilterPopover from "./components/FilterPopover";
 import ProductGrid from "./components/ProductGrid";
 import ProductModal from "./components/ProductModal";
+import Pagination from "./components/Pagination";
 import Footer from "./components/Footer";
-import { TRANSLATIONS, QUICK_SEARCHES } from "./i18n";
-import { fetchFacets, fetchProducts, fetchProduct } from "./api";
+import { TRANSLATIONS } from "./i18n";
+import { fetchFacets, fetchProducts, fetchProduct, placeOrder } from "./api";
 import { useDebouncedValue } from "./hooks/useDebouncedValue";
 import { useScrolled } from "./hooks/useScrolled";
 import { EXCHANGE_RATES } from "./currency";
@@ -16,6 +17,7 @@ function readStored(key, fallback) {
 }
 
 const DEFAULT_SORT = "relevance";
+const PAGE_SIZE = 8;
 
 export default function App() {
   const [lang, setLang] = useState(() => readStored("atlas_lang", "en"));
@@ -34,6 +36,9 @@ export default function App() {
   const [priceValue, setPriceValue] = useState({ min: 0, max: 10000 });
 
   const [items, setItems] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
   const [selectedProductId, setSelectedProductId] = useState(null);
   const [selectedProduct, setSelectedProduct] = useState(null);
 
@@ -69,7 +74,18 @@ export default function App() {
       .catch((error) => console.error("Facet load failed", error));
   }, []);
 
+  // Changing a filter should jump back to page 1. Tracked via ref (rather
+  // than a separate effect calling setPage) so a filter change never fires
+  // two competing requests for two different pages.
+  const filtersSignature = JSON.stringify([query, category, sort, inStockOnly, debouncedPrice]);
+  const previousFiltersSignature = useRef(filtersSignature);
+
   useEffect(() => {
+    const filtersChanged = previousFiltersSignature.current !== filtersSignature;
+    previousFiltersSignature.current = filtersSignature;
+    const requestedPage = filtersChanged ? 1 : page;
+    if (filtersChanged && page !== 1) setPage(1);
+
     fetchProducts({
       q: query,
       category,
@@ -77,13 +93,21 @@ export default function App() {
       inStockOnly,
       minPrice: debouncedPrice.min,
       maxPrice: debouncedPrice.max,
+      page: requestedPage,
+      pageSize: PAGE_SIZE,
     })
-      .then((data) => setItems(data.items || []))
+      .then((data) => {
+        setItems(data.items || []);
+        setTotal(data.total || 0);
+        setTotalPages(data.totalPages || 1);
+      })
       .catch((error) => {
         console.error("Search failed", error);
         setItems([]);
+        setTotal(0);
+        setTotalPages(1);
       });
-  }, [query, category, sort, inStockOnly, debouncedPrice]);
+  }, [filtersSignature, page]);
 
   useEffect(() => {
     if (!selectedProductId) {
@@ -108,7 +132,22 @@ export default function App() {
     return count;
   }, [category, inStockOnly, priceValue, priceBounds]);
 
-  const summary = query ? t.resultsFor(items.length, query) : t.productsCount(items.length);
+  const summary = query ? t.resultsFor(total, query) : t.productsCount(total);
+
+  function changePage(nextPage) {
+    setPage(nextPage);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function handleOrder(id) {
+    const result = await placeOrder(id);
+    if (inStockOnly && !result.item.inStock) {
+      setItems((current) => current.filter((item) => item.id !== id));
+      setTotal((current) => Math.max(0, current - 1));
+    } else {
+      setItems((current) => current.map((item) => (item.id === id ? result.item : item)));
+    }
+  }
 
   function goHome() {
     setQuery("");
@@ -162,21 +201,21 @@ export default function App() {
             </div>
           }
         />
-
-        <div className={`quick-searches quick-searches-row${compact ? " quick-searches-collapsed" : ""}`}>
-          {QUICK_SEARCHES.map((search) => (
-            <button key={search.q} type="button" className="chip" onClick={() => setQuery(search.q)}>
-              {search[lang] || search.en}
-            </button>
-          ))}
-        </div>
       </div>
 
       <p className="shop-result-summary shop-result-summary-standalone">{summary}</p>
 
       <ProductGrid items={items} t={t} currency={currency} query={query} onOpenProduct={setSelectedProductId} />
 
-      <ProductModal product={selectedProduct} t={t} currency={currency} onClose={() => setSelectedProductId(null)} />
+      <Pagination page={page} totalPages={totalPages} onPageChange={changePage} />
+
+      <ProductModal
+        product={selectedProduct}
+        t={t}
+        currency={currency}
+        onClose={() => setSelectedProductId(null)}
+        onOrder={handleOrder}
+      />
 
       <Footer t={t} />
     </div>

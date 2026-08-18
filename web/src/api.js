@@ -24,3 +24,14 @@ export function fetchSuggestions(query, limit = 6) {
   const params = new URLSearchParams({ q: query, limit: String(limit) });
   return getJson(`/api/shop/suggest?${params}`);
 }
+
+export async function placeOrder(id) {
+  const response = await fetch("/api/shop/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ itemId: id }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || `Request failed: ${response.status}`);
+  return data;
+}
