@@ -17,7 +17,7 @@ function readStored(key, fallback) {
 }
 
 const DEFAULT_SORT = "relevance";
-const PAGE_SIZE = 8;
+const PAGE_SIZE = 20;
 
 export default function App() {
   const [lang, setLang] = useState(() => readStored("atlas_lang", "en"));
