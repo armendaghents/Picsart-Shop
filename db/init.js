@@ -359,14 +359,21 @@ async function runMigrations(db) {
 }
 
 // Dropped in dependency order so the foreign keys don't block the reset.
+// Anything that references another table is dropped before the table it points
+// at: cart_items/orders/refresh_tokens/auth_codes all reference users, and
+// cart_items also references inventory_items.
 const DROP_ALL = `
   DROP TABLE IF EXISTS inventory_fts;
+  DROP TABLE IF EXISTS cart_items;
   DROP TABLE IF EXISTS orders;
+  DROP TABLE IF EXISTS refresh_tokens;
+  DROP TABLE IF EXISTS auth_codes;
   DROP TABLE IF EXISTS search_events;
   DROP TABLE IF EXISTS inventory_items;
   DROP TABLE IF EXISTS locations;
   DROP TABLE IF EXISTS warehouses;
   DROP TABLE IF EXISTS categories;
+  DROP TABLE IF EXISTS users;
 `;
 
 export async function openDatabase({ reset = false, seed = true } = {}) {

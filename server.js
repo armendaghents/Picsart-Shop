@@ -40,6 +40,7 @@ import {
   passwordProblems,
   serializeCookie,
   signAccessToken,
+  TOKEN_USE_CHALLENGE,
   validateCredentials,
   verifyAccessToken,
   verifyPassword,
@@ -1016,7 +1017,11 @@ app.post("/api/auth/login", requireCsrf, async (request, response) => {
         "Set-Cookie",
         serializeCookie(
           CHALLENGE_COOKIE,
-          signAccessToken({ sub: user.id, purpose: "totp", remember }, AUTH_SECRET, CHALLENGE_TTL_SECONDS),
+          signAccessToken(
+            { sub: user.id, use: TOKEN_USE_CHALLENGE, purpose: "totp", remember },
+            AUTH_SECRET,
+            CHALLENGE_TTL_SECONDS
+          ),
           cookieAttributes({ secure: isSecureRequest(request), maxAgeSeconds: CHALLENGE_TTL_SECONDS })
         )
       );
@@ -1045,7 +1050,10 @@ async function completeLogin(request, response, user, remember) {
 
 app.post("/api/auth/two-factor", requireCsrf, async (request, response) => {
   const cookies = parseCookies(request.headers.cookie);
-  const challenge = verifyAccessToken(cookies[CHALLENGE_COOKIE], AUTH_SECRET);
+  // Verified as a challenge token specifically — an ordinary access token (or a
+  // token of any other use) will not satisfy this, just as the challenge token
+  // can no longer satisfy attachUser's access-token check.
+  const challenge = verifyAccessToken(cookies[CHALLENGE_COOKIE], AUTH_SECRET, TOKEN_USE_CHALLENGE);
   if (!challenge || challenge.purpose !== "totp") {
     return response.status(401).json({ error: "challenge_expired", message: "That took too long. Please sign in again." });
   }

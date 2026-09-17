@@ -100,6 +100,17 @@ export default async function run(client) {
   await call(jar2fa, "GET", "/api/auth/csrf");
   r = await call(jar2fa, "POST", "/api/auth/login", { email, password: "ResetPassword123" });
   t.check("the password alone no longer signs in", r.data.requiresTwoFactor === true && !jar2fa.get("atlas_access"), JSON.stringify(r.data));
+  // Regression: the pre-2FA challenge cookie must not double as a session.
+  // Presenting it as atlas_access — the token confusion that let a stolen
+  // password skip the second factor entirely — has to be rejected.
+  // Token-type confusion: the challenge cookie is minted once the password is
+  // accepted but before the second factor. It is a validly signed token for the
+  // same account, so if it were accepted as an access token, moving its value
+  // into atlas_access would skip two-step verification entirely.
+  const challengeToken = jar2fa.get("atlas_2fa");
+  t.check("a challenge cookie is issued to replay", Boolean(challengeToken));
+  r = await call(jar2fa, "GET", "/api/auth/sessions", undefined, { cookie: `atlas_access=${challengeToken}` });
+  t.check("the 2FA challenge token is not accepted as a session", r.status === 401, `got ${r.status}`);
   r = await call(jar2fa, "POST", "/api/auth/two-factor", { code: "000000" });
   t.check("a wrong second factor is rejected", r.status === 401);
   r = await call(jar2fa, "POST", "/api/auth/two-factor", { code: totp() });
