@@ -27,7 +27,8 @@ function conditionClass(condition) {
 export default function ProductCard({ item, t, currency, query, onOpen }) {
   const [photoIndex, setPhotoIndex] = useState(0);
   const availabilityLabel = t.availability[item.availability] || item.availability;
-  const category = item.category.split(">").map((part) => part.trim()).at(-1);
+  const conditionLabel = t.condition[item.condition] || item.condition;
+  const category = item.category ? item.category.split(">").map((part) => part.trim()).at(-1) : "";
   const photos = item.images && item.images.length ? item.images : null;
   const hasGallery = photos && photos.length > 1;
 
@@ -43,10 +44,10 @@ export default function ProductCard({ item, t, currency, query, onOpen }) {
 
         {hasGallery && (
           <>
-            <button className="gallery-nav gallery-prev" type="button" onClick={(event) => showPhoto(event, photoIndex - 1)} aria-label="Previous photo">
+            <button className="gallery-nav gallery-prev" type="button" onClick={(event) => showPhoto(event, photoIndex - 1)} aria-label={t.previousPhoto}>
               ‹
             </button>
-            <button className="gallery-nav gallery-next" type="button" onClick={(event) => showPhoto(event, photoIndex + 1)} aria-label="Next photo">
+            <button className="gallery-nav gallery-next" type="button" onClick={(event) => showPhoto(event, photoIndex + 1)} aria-label={t.nextPhoto}>
               ›
             </button>
             <div className="gallery-dots">
@@ -60,12 +61,10 @@ export default function ProductCard({ item, t, currency, query, onOpen }) {
       <div className="shop-card-body">
         <div className="shop-card-badges">
           <span className={availabilityClass(item.availability)}>{availabilityLabel}</span>
-          {item.condition && <span className={conditionClass(item.condition)}>{item.condition}</span>}
+          {item.condition && <span className={conditionClass(item.condition)}>{conditionLabel}</span>}
         </div>
         <h3>{highlight(item.name, query)}</h3>
-        <p className="shop-brand">
-          {item.brand} {item.brand ? "·" : ""} {category}
-        </p>
+        <p className="shop-brand">{[item.brand, category].filter(Boolean).join(" · ")}</p>
         <p className="shop-description">{highlight(item.description, query)}</p>
         <div className="shop-card-footer">
           <span className="price">{formatMoney(item.price, currency, item.currency)}</span>

@@ -6,7 +6,7 @@ export default function ProductGrid({ items, t, currency, query, onOpenProduct }
   }
 
   return (
-    <section className="shop-results" aria-label="Products">
+    <section className="shop-results" aria-label={t.products}>
       {items.map((item) => (
         <ProductCard key={item.id} item={item} t={t} currency={currency} query={query} onOpen={onOpenProduct} />
       ))}

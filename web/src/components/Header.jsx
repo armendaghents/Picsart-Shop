@@ -1,6 +1,23 @@
 import { LANGUAGES } from "../i18n";
 
-export default function Header({ t, lang, onLangChange, currency, onCurrencyChange, dark, onToggleDark, onHome, searchSlot, compact }) {
+export default function Header({
+  t,
+  lang,
+  onLangChange,
+  currency,
+  onCurrencyChange,
+  dark,
+  onToggleDark,
+  onHome,
+  searchSlot,
+  compact,
+  user,
+  cartCount,
+  onOpenCart,
+  onSignIn,
+  onSignOut,
+  onOpenAccount,
+}) {
   return (
     <header className={`app-header${compact ? " app-header-compact" : ""}`}>
       <a
@@ -23,8 +40,8 @@ export default function Header({ t, lang, onLangChange, currency, onCurrencyChan
       <div className="top-actions">
         <select
           className="lang-select"
-          aria-label="Currency"
-          title="Currency"
+          aria-label={t.currencyLabel}
+          title={t.currencyLabel}
           value={currency}
           onChange={(event) => onCurrencyChange(event.target.value)}
         >
@@ -35,8 +52,8 @@ export default function Header({ t, lang, onLangChange, currency, onCurrencyChan
 
         <select
           className="lang-select"
-          aria-label="Language"
-          title="Language"
+          aria-label={t.languageLabel}
+          title={t.languageLabel}
           value={lang}
           onChange={(event) => onLangChange(event.target.value)}
         >
@@ -47,9 +64,30 @@ export default function Header({ t, lang, onLangChange, currency, onCurrencyChan
           ))}
         </select>
 
-        <button className="icon-button" type="button" title="Toggle theme" onClick={onToggleDark}>
+        <button className="icon-button" type="button" title={t.toggleTheme} onClick={onToggleDark}>
           {dark ? "☀" : "◐"}
         </button>
+
+        <button className="icon-button cart-button" type="button" title={t.basket} onClick={onOpenCart}>
+          <span aria-hidden="true">🧺</span>
+          {cartCount > 0 && <span className="cart-badge">{cartCount}</span>}
+          <span className="sr-only">{t.basket}</span>
+        </button>
+
+        {user ? (
+          <div className="account-menu">
+            <button className="account-chip" type="button" title={t.myAccount} onClick={onOpenAccount}>
+              {(user.name || user.email).slice(0, 1).toUpperCase()}
+            </button>
+            <button className="text-button" type="button" onClick={onSignOut}>
+              {t.signOut}
+            </button>
+          </div>
+        ) : (
+          <button className="text-button" type="button" onClick={onSignIn}>
+            {t.signIn}
+          </button>
+        )}
       </div>
     </header>
   );

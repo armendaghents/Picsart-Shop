@@ -4,8 +4,12 @@ export const EXCHANGE_RATES = {
   RUB: 90,
 };
 
+export function convertMoney(amount, targetCurrency, originalCurrency = "USD") {
+  return (Number(amount) || 0) * (EXCHANGE_RATES[targetCurrency] / EXCHANGE_RATES[originalCurrency]);
+}
+
 export function formatMoney(amount, targetCurrency, originalCurrency = "USD") {
-  const converted = (Number(amount) || 0) * (EXCHANGE_RATES[targetCurrency] / EXCHANGE_RATES[originalCurrency]);
+  const converted = convertMoney(amount, targetCurrency, originalCurrency);
   const locale = targetCurrency === "AMD" ? "hy-AM" : targetCurrency === "RUB" ? "ru-RU" : "en-US";
   return new Intl.NumberFormat(locale, {
     style: "currency",

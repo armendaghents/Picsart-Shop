@@ -1,10 +1,22 @@
-import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createDatabase, DATABASE_URL } from "./client.js";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = process.env.DATABASE_FILE || path.join(__dirname, "..", "data", "atlas.db");
+
+// Never print credentials when reporting a connection problem.
+export function describeConnection(url = DATABASE_URL) {
+  try {
+    const parsed = new URL(url);
+    parsed.password = "";
+    parsed.username = parsed.username ? parsed.username : "";
+    return parsed.toString().replace(":@", "@");
+  } catch {
+    return "the configured DATABASE_URL";
+  }
+}
 
 const SEED_ITEMS = [
   {
@@ -173,42 +185,34 @@ function categoryPath(name) {
   return name;
 }
 
-function ensureLookup(db, table, name, extraCols = {}) {
-  const existing = db.prepare(`SELECT id FROM ${table} WHERE name = ?`).get(name);
-  if (existing) return existing.id;
-  const cols = ["name", ...Object.keys(extraCols)];
-  const placeholders = cols.map(() => "?").join(", ");
-  const values = [name, ...Object.values(extraCols)];
-  const info = db.prepare(`INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders})`).run(...values);
-  return Number(info.lastInsertRowid);
-}
-
-function ensureCategory(db, path) {
-  const existing = db.prepare(`SELECT id FROM categories WHERE path = ?`).get(path);
+async function ensureCategory(db, path) {
+  const existing = await db.prepare(`SELECT id FROM categories WHERE path = ?`).get(path);
   if (existing) return existing.id;
   const name = path.split(">").map((part) => part.trim()).at(-1);
-  const info = db.prepare(`INSERT INTO categories (name, path) VALUES (?, ?)`).run(name, path);
-  return Number(info.lastInsertRowid);
+  const created = await db.prepare(`INSERT INTO categories (name, path) VALUES (?, ?) RETURNING id`).get(name, path);
+  return created.id;
 }
 
-function ensureWarehouse(db, name) {
-  const existing = db.prepare(`SELECT id FROM warehouses WHERE name = ?`).get(name);
+async function ensureWarehouse(db, name) {
+  const existing = await db.prepare(`SELECT id FROM warehouses WHERE name = ?`).get(name);
   if (existing) return existing.id;
-  const info = db.prepare(`INSERT INTO warehouses (name) VALUES (?)`).run(name);
-  return Number(info.lastInsertRowid);
+  const created = await db.prepare(`INSERT INTO warehouses (name) VALUES (?) RETURNING id`).get(name);
+  return created.id;
 }
 
-function ensureLocation(db, warehouseId, code) {
-  const existing = db.prepare(`SELECT id FROM locations WHERE warehouse_id = ? AND code = ?`).get(warehouseId, code);
+async function ensureLocation(db, warehouseId, code) {
+  const existing = await db.prepare(`SELECT id FROM locations WHERE warehouse_id = ? AND code = ?`).get(warehouseId, code);
   if (existing) return existing.id;
-  const info = db.prepare(`INSERT INTO locations (warehouse_id, code) VALUES (?, ?)`).run(warehouseId, code);
-  return Number(info.lastInsertRowid);
+  const created = await db
+    .prepare(`INSERT INTO locations (warehouse_id, code) VALUES (?, ?) RETURNING id`)
+    .get(warehouseId, code);
+  return created.id;
 }
 
-export function indexItemInFts(db, item) {
-  db.prepare(`DELETE FROM inventory_fts WHERE rowid = ?`).run(item.id);
-  db.prepare(
-    `INSERT INTO inventory_fts (rowid, name, brand, model, sku, barcode, serial_number, tags, ocr_text, description, category_path)
+export async function indexItemInFts(db, item) {
+  await db.prepare(`DELETE FROM inventory_fts WHERE item_id = ?`).run(item.id);
+  await db.prepare(
+    `INSERT INTO inventory_fts (item_id, name, brand, model, sku, barcode, serial_number, tags, ocr_text, description, category_path)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     item.id,
@@ -225,26 +229,27 @@ export function indexItemInFts(db, item) {
   );
 }
 
-function insertItem(db, item) {
-  const categoryId = ensureCategory(db, categoryPath(item.category));
-  const warehouseId = ensureWarehouse(db, item.warehouse);
-  const locationId = ensureLocation(db, warehouseId, item.location);
+async function insertItem(db, item) {
+  const categoryId = await ensureCategory(db, categoryPath(item.category));
+  const warehouseId = await ensureWarehouse(db, item.warehouse);
+  const locationId = await ensureLocation(db, warehouseId, item.location);
 
-  const info = db.prepare(
+  const created = await db.prepare(
     `INSERT INTO inventory_items (
       external_id, sku, barcode, serial_number, name, brand, model,
       category_id, warehouse_id, location_id, status, quantity, reserved_quantity, reorder_point,
       purchase_price, selling_price, currency, description, ocr_text, icon, colors, tags, added_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).run(
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    RETURNING id`
+  ).get(
     item.externalId, item.sku, item.barcode, item.serial, item.name, item.brand, item.model,
     categoryId, warehouseId, locationId, item.status, item.quantity, item.reserved, item.reorderPoint,
     item.cost, item.price, item.currency, item.description, item.ocr, item.icon,
     JSON.stringify(item.colors), JSON.stringify(item.tags), item.added
   );
 
-  const id = Number(info.lastInsertRowid);
-  indexItemInFts(db, {
+  const id = created.id;
+  await indexItemInFts(db, {
     id,
     name: item.name,
     brand: item.brand,
@@ -260,125 +265,135 @@ function insertItem(db, item) {
   return id;
 }
 
+async function tableColumns(db, table) {
+  return db
+    .prepare(
+      `SELECT column_name, is_nullable, data_type FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = ?`
+    )
+    .all(table);
+}
+
 // CREATE TABLE IF NOT EXISTS doesn't add new columns to an already-existing
-// table, so anyone who ran the app before these columns existed needs them
-// added by hand here.
-function runMigrations(db) {
-  const columns = db.prepare("PRAGMA table_info(inventory_items)").all().map((column) => column.name);
+// table, so anyone whose database predates these columns needs them added by
+// hand here.
+async function runMigrations(db) {
+  const itemColumns = await tableColumns(db, "inventory_items");
+  const names = itemColumns.map((column) => column.column_name);
 
-  if (!columns.includes("condition")) {
-    db.exec("ALTER TABLE inventory_items ADD COLUMN condition TEXT NOT NULL DEFAULT 'New'");
+  if (!names.includes("condition")) {
+    await db.exec("ALTER TABLE inventory_items ADD COLUMN condition TEXT NOT NULL DEFAULT 'New'");
   }
 
-  if (!columns.includes("images")) {
-    db.exec("ALTER TABLE inventory_items ADD COLUMN images TEXT");
+  if (!names.includes("images")) {
+    await db.exec("ALTER TABLE inventory_items ADD COLUMN images TEXT");
     // Backfill from the old single image_url column, if it existed.
-    if (columns.includes("image_url")) {
-      const rows = db.prepare("SELECT id, image_url FROM inventory_items WHERE image_url IS NOT NULL").all();
+    if (names.includes("image_url")) {
+      const rows = await db.prepare("SELECT id, image_url FROM inventory_items WHERE image_url IS NOT NULL").all();
       const update = db.prepare("UPDATE inventory_items SET images = ? WHERE id = ?");
-      for (const row of rows) update.run(JSON.stringify([row.image_url]), row.id);
+      for (const row of rows) await update.run(JSON.stringify([row.image_url]), row.id);
     }
   }
 
-  if (!columns.includes("custom_fields")) {
-    db.exec("ALTER TABLE inventory_items ADD COLUMN custom_fields TEXT");
+  if (!names.includes("custom_fields")) {
+    await db.exec("ALTER TABLE inventory_items ADD COLUMN custom_fields TEXT");
   }
 
-  // SQLite can't drop a NOT NULL constraint with ALTER TABLE, so making
-  // warehouse/location optional on an existing database means rebuilding the
-  // table. Only runs once, the first time this version starts against an
-  // older database — freshly created databases already get nullable columns
-  // straight from schema.sql.
-  const warehouseCol = db.prepare("PRAGMA table_info(inventory_items)").all().find((c) => c.name === "warehouse_id");
-  if (warehouseCol && warehouseCol.notnull) {
-    db.exec("PRAGMA foreign_keys = OFF");
-    db.exec("BEGIN TRANSACTION");
-    try {
-      db.exec(`
-        CREATE TABLE inventory_items_new (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          external_id TEXT NOT NULL UNIQUE,
-          sku TEXT NOT NULL UNIQUE,
-          barcode TEXT,
-          serial_number TEXT,
-          name TEXT NOT NULL,
-          brand TEXT,
-          model TEXT,
-          category_id INTEGER NOT NULL REFERENCES categories(id),
-          warehouse_id INTEGER REFERENCES warehouses(id),
-          location_id INTEGER REFERENCES locations(id),
-          status TEXT NOT NULL DEFAULT 'Available',
-          condition TEXT NOT NULL DEFAULT 'New',
-          quantity INTEGER NOT NULL DEFAULT 0,
-          reserved_quantity INTEGER NOT NULL DEFAULT 0,
-          reorder_point INTEGER NOT NULL DEFAULT 5,
-          purchase_price REAL NOT NULL DEFAULT 0,
-          selling_price REAL NOT NULL DEFAULT 0,
-          currency TEXT NOT NULL DEFAULT 'USD',
-          description TEXT,
-          ocr_text TEXT,
-          icon TEXT,
-          images TEXT,
-          colors TEXT,
-          tags TEXT,
-          custom_fields TEXT,
-          added_at TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-          deleted_at TEXT
-        )
-      `);
-      db.exec(`
-        INSERT INTO inventory_items_new
-        SELECT id, external_id, sku, barcode, serial_number, name, brand, model,
-          category_id, warehouse_id, location_id, status, condition, quantity, reserved_quantity, reorder_point,
-          purchase_price, selling_price, currency, description, ocr_text, icon, images, colors, tags, custom_fields,
-          added_at, updated_at, deleted_at
-        FROM inventory_items
-      `);
-      db.exec("DROP TABLE inventory_items");
-      db.exec("ALTER TABLE inventory_items_new RENAME TO inventory_items");
-      db.exec("CREATE INDEX IF NOT EXISTS idx_items_category ON inventory_items(category_id)");
-      db.exec("CREATE INDEX IF NOT EXISTS idx_items_warehouse ON inventory_items(warehouse_id)");
-      db.exec("CREATE INDEX IF NOT EXISTS idx_items_status ON inventory_items(status)");
-      db.exec("CREATE INDEX IF NOT EXISTS idx_items_deleted ON inventory_items(deleted_at)");
-      db.exec("COMMIT");
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    } finally {
-      db.exec("PRAGMA foreign_keys = ON");
+  // Warehouse, location, name, SKU, and category are all optional. On a database
+  // created before that change the columns are still NOT NULL; unlike SQLite,
+  // Postgres can drop the constraint in place, so no table rebuild is needed.
+  for (const column of ["warehouse_id", "location_id", "name", "sku", "category_id"]) {
+    const existing = itemColumns.find((entry) => entry.column_name === column);
+    if (existing && existing.is_nullable === "NO") {
+      await db.exec(`ALTER TABLE inventory_items ALTER COLUMN ${column} DROP NOT NULL`);
     }
   }
 
-  const orderColumns = db.prepare("PRAGMA table_info(orders)").all().map((column) => column.name);
-  if (!orderColumns.includes("category")) {
-    db.exec("ALTER TABLE orders ADD COLUMN category TEXT");
+  // Columns added after customer accounts shipped.
+  const userColumns = (await tableColumns(db, "users")).map((column) => column.column_name);
+  for (const [column, definition] of [
+    ["email_verified_at", "TEXT"],
+    ["password_changed_at", "TEXT"],
+    ["totp_secret", "TEXT"],
+    ["totp_enabled_at", "TEXT"],
+    ["recovery_codes", "TEXT"],
+    ["sessions_valid_from", "BIGINT"],
+  ]) {
+    if (!userColumns.includes(column)) {
+      await db.exec(`ALTER TABLE users ADD COLUMN ${column} ${definition}`);
+    }
+  }
+  // Anyone who registered before email verification existed stays signed in:
+  // they are treated as already verified rather than locked out.
+  if (!userColumns.includes("email_verified_at")) {
+    await db.exec("UPDATE users SET email_verified_at = created_at WHERE email_verified_at IS NULL");
+  }
+
+  // Shipped briefly as INTEGER, which a millisecond timestamp overflows.
+  const validFrom = (await tableColumns(db, "users")).find((column) => column.column_name === "sessions_valid_from");
+  if (validFrom && validFrom.data_type === "integer") {
+    await db.exec("ALTER TABLE users ALTER COLUMN sessions_valid_from TYPE BIGINT");
+  }
+
+  const refreshColumns = (await tableColumns(db, "refresh_tokens")).map((column) => column.column_name);
+  if (!refreshColumns.includes("last_used_at")) {
+    await db.exec("ALTER TABLE refresh_tokens ADD COLUMN last_used_at TEXT");
+  }
+
+  // Orders placed before customer accounts existed have no buyer.
+  const orderColumns = await tableColumns(db, "orders");
+  if (!orderColumns.some((column) => column.column_name === "user_id")) {
+    await db.exec("ALTER TABLE orders ADD COLUMN user_id INTEGER REFERENCES users(id)");
+  }
+  if (!orderColumns.some((column) => column.column_name === "category")) {
+    await db.exec("ALTER TABLE orders ADD COLUMN category TEXT");
+  }
+
+  // An order snapshots the item's name and SKU, both of which are optional.
+  for (const column of ["name", "sku"]) {
+    const existing = orderColumns.find((entry) => entry.column_name === column);
+    if (existing && existing.is_nullable === "NO") {
+      await db.exec(`ALTER TABLE orders ALTER COLUMN ${column} DROP NOT NULL`);
+    }
   }
 }
 
-export function openDatabase({ reset = false } = {}) {
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  if (reset && fs.existsSync(DB_PATH)) fs.rmSync(DB_PATH);
+// Dropped in dependency order so the foreign keys don't block the reset.
+const DROP_ALL = `
+  DROP TABLE IF EXISTS inventory_fts;
+  DROP TABLE IF EXISTS orders;
+  DROP TABLE IF EXISTS search_events;
+  DROP TABLE IF EXISTS inventory_items;
+  DROP TABLE IF EXISTS locations;
+  DROP TABLE IF EXISTS warehouses;
+  DROP TABLE IF EXISTS categories;
+`;
 
-  const db = new Database(DB_PATH);
-  db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA foreign_keys = ON;");
+export async function openDatabase({ reset = false, seed = true } = {}) {
+  const db = createDatabase();
+
+  try {
+    await db.prepare("SELECT 1").get();
+  } catch (error) {
+    await db.close().catch(() => {});
+    throw new Error(
+      `Cannot connect to PostgreSQL at ${describeConnection()} — ${error.message}\n` +
+        `Start PostgreSQL and make sure the database exists (createdb atlas), or set DATABASE_URL in .env.`
+    );
+  }
+
+  if (reset) await db.exec(DROP_ALL);
 
   const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
-  db.exec(schema);
-  runMigrations(db);
+  await db.exec(schema);
+  await runMigrations(db);
 
-  const { count } = db.prepare("SELECT COUNT(*) AS count FROM inventory_items").get();
-  if (count === 0) {
-    db.exec("BEGIN");
-    try {
-      for (const item of SEED_ITEMS) insertItem(db, item);
-      db.exec("COMMIT");
-      console.log(`Seeded ${SEED_ITEMS.length} inventory items into ${DB_PATH}`);
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    }
+  const { count } = await db.prepare("SELECT COUNT(*) AS count FROM inventory_items").get();
+  if (seed && count === 0) {
+    await db.transaction(async (tx) => {
+      for (const item of SEED_ITEMS) await insertItem(tx, item);
+    });
+    console.log(`Seeded ${SEED_ITEMS.length} inventory items into ${describeConnection()}`);
   }
 
   return db;
@@ -387,6 +402,12 @@ export function openDatabase({ reset = false } = {}) {
 // Allow `node db/init.js --reset` to rebuild the database from scratch.
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
   const reset = process.argv.includes("--reset");
-  openDatabase({ reset });
-  console.log(reset ? "Database reset and reseeded." : "Database is ready.");
+  try {
+    const db = await openDatabase({ reset });
+    console.log(reset ? "Database reset and reseeded." : "Database is ready.");
+    await db.close();
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
 }

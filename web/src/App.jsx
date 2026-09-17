@@ -4,10 +4,24 @@ import SearchBar from "./components/SearchBar";
 import FilterPopover from "./components/FilterPopover";
 import ProductGrid from "./components/ProductGrid";
 import ProductModal from "./components/ProductModal";
+import AuthModal from "./components/AuthModal";
+import CartPanel from "./components/CartPanel";
+import AccountPanel from "./components/AccountPanel";
 import Pagination from "./components/Pagination";
 import Footer from "./components/Footer";
 import { TRANSLATIONS } from "./i18n";
-import { fetchFacets, fetchProducts, fetchProduct, placeOrder } from "./api";
+import {
+  fetchFacets,
+  fetchProducts,
+  fetchProduct,
+  fetchCart,
+  addToCart,
+  setCartQuantity,
+  removeFromCart,
+  checkout,
+  restoreSession,
+  logout,
+} from "./api";
 import { useDebouncedValue } from "./hooks/useDebouncedValue";
 import { useScrolled } from "./hooks/useScrolled";
 import { EXCHANGE_RATES } from "./currency";
@@ -42,13 +56,56 @@ export default function App() {
   const [selectedProductId, setSelectedProductId] = useState(null);
   const [selectedProduct, setSelectedProduct] = useState(null);
 
+  const [user, setUser] = useState(null);
+  const [cart, setCart] = useState(null);
+  const [cartBusy, setCartBusy] = useState(false);
+  const [cartOpen, setCartOpen] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  // The product someone tried to buy while signed out. Held here so the
+  // purchase completes by itself once they finish signing in.
+  const [pendingBuyId, setPendingBuyId] = useState(null);
+  // Bumped after a checkout so the grid re-queries stock that just changed.
+  const [catalogVersion, setCatalogVersion] = useState(0);
+
   const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
   const debouncedPrice = useDebouncedValue(priceValue, 200);
 
   useEffect(() => {
     document.documentElement.lang = lang;
+    document.title = t.pageTitle;
     localStorage.setItem("atlas_lang", lang);
-  }, [lang]);
+  }, [lang, t]);
+
+  // Auto sign-in: a still-valid access token answers straight away, otherwise
+  // the refresh token is exchanged for a new session behind the scenes.
+  useEffect(() => {
+    let cancelled = false;
+    restoreSession()
+      .then((restored) => {
+        if (!cancelled) setUser(restored);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setCart(null);
+      return;
+    }
+    let cancelled = false;
+    fetchCart()
+      .then((loaded) => {
+        if (!cancelled) setCart(loaded);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   useEffect(() => {
     localStorage.setItem("atlas_currency", currency);
@@ -107,7 +164,7 @@ export default function App() {
         setTotal(0);
         setTotalPages(1);
       });
-  }, [filtersSignature, page]);
+  }, [filtersSignature, page, catalogVersion]);
 
   useEffect(() => {
     if (!selectedProductId) {
@@ -139,14 +196,60 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  async function handleOrder(id) {
-    const result = await placeOrder(id);
-    if (inStockOnly && !result.item.inStock) {
-      setItems((current) => current.filter((item) => item.id !== id));
-      setTotal((current) => Math.max(0, current - 1));
-    } else {
-      setItems((current) => current.map((item) => (item.id === id ? result.item : item)));
+  // Returns "deferred" when the click can't be completed yet because nobody is
+  // signed in; the sign-in form takes it from there.
+  async function handleBuy(id) {
+    if (!user) {
+      setPendingBuyId(id);
+      setAuthOpen(true);
+      return "deferred";
     }
+    setCart(await addToCart(id));
+    return "added";
+  }
+
+  async function handleAuthenticated(authenticatedUser) {
+    setUser(authenticatedUser);
+    setAuthOpen(false);
+
+    const buyNow = pendingBuyId;
+    setPendingBuyId(null);
+    try {
+      // Their basket may already have things in it from another device.
+      const loaded = buyNow ? await addToCart(buyNow) : await fetchCart();
+      setCart(loaded);
+      if (buyNow) setCartOpen(true);
+    } catch {
+      // A basket that fails to load shouldn't undo a successful sign-in.
+    }
+  }
+
+  async function handleSignOut() {
+    try {
+      await logout();
+    } finally {
+      setUser(null);
+      setCart(null);
+      setCartOpen(false);
+      setAccountOpen(false);
+    }
+  }
+
+  async function runCartAction(action) {
+    setCartBusy(true);
+    try {
+      setCart(await action());
+    } finally {
+      setCartBusy(false);
+    }
+  }
+
+  async function handleCheckout() {
+    const result = await checkout();
+    setCart(await fetchCart());
+    // Stock moved, so the grid behind the basket is now out of date.
+    setCatalogVersion((value) => value + 1);
+    return result;
   }
 
   function goHome() {
@@ -172,6 +275,12 @@ export default function App() {
           onToggleDark={() => setDark((value) => !value)}
           onHome={goHome}
           compact={compact}
+          user={user}
+          cartCount={cart?.itemCount || 0}
+          onOpenCart={() => (user ? setCartOpen(true) : setAuthOpen(true))}
+          onSignIn={() => setAuthOpen(true)}
+          onSignOut={handleSignOut}
+          onOpenAccount={() => setAccountOpen(true)}
           searchSlot={
             <div className="search-anchor">
               <SearchBar
@@ -207,15 +316,49 @@ export default function App() {
 
       <ProductGrid items={items} t={t} currency={currency} query={query} onOpenProduct={setSelectedProductId} />
 
-      <Pagination page={page} totalPages={totalPages} onPageChange={changePage} />
+      <Pagination t={t} page={page} totalPages={totalPages} onPageChange={changePage} />
 
       <ProductModal
         product={selectedProduct}
         t={t}
         currency={currency}
         onClose={() => setSelectedProductId(null)}
-        onOrder={handleOrder}
+        onBuy={handleBuy}
       />
+
+      {authOpen && (
+        <AuthModal
+          t={t}
+          onClose={() => {
+            setAuthOpen(false);
+            setPendingBuyId(null);
+          }}
+          onAuthenticated={handleAuthenticated}
+        />
+      )}
+
+      {accountOpen && user && (
+        <AccountPanel
+          t={t}
+          user={user}
+          currency={currency}
+          onClose={() => setAccountOpen(false)}
+          onUserChange={setUser}
+        />
+      )}
+
+      {cartOpen && user && (
+        <CartPanel
+          t={t}
+          cart={cart}
+          currency={currency}
+          busy={cartBusy}
+          onClose={() => setCartOpen(false)}
+          onSetQuantity={(itemId, quantity) => runCartAction(() => setCartQuantity(itemId, Math.max(0, quantity)))}
+          onRemove={(itemId) => runCartAction(() => removeFromCart(itemId))}
+          onCheckout={handleCheckout}
+        />
+      )}
 
       <Footer t={t} />
     </div>

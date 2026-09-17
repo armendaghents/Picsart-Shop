@@ -221,15 +221,15 @@ export default function ItemFormModal({ mode, item, onClose, onSaved }) {
         <div className="modal-grid">
           <label>
             Name
-            <input value={form.name} onChange={(e) => update("name", e.target.value)} required placeholder="e.g. Titan Rack Server" />
+            <input value={form.name} onChange={(e) => update("name", e.target.value)} placeholder="optional" />
           </label>
           <label>
             SKU
-            <input value={form.sku} onChange={(e) => update("sku", e.target.value)} required placeholder="e.g. SRV-TITAN-01" />
+            <input value={form.sku} onChange={(e) => update("sku", e.target.value)} placeholder="optional" />
           </label>
           <label>
             Category path
-            <input value={form.category} onChange={(e) => update("category", e.target.value)} required placeholder="e.g. Servers > Rack" />
+            <input value={form.category} onChange={(e) => update("category", e.target.value)} placeholder="optional" />
           </label>
           <label>
             Brand

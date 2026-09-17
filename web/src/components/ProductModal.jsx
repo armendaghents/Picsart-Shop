@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { formatMoney } from "../currency";
+import { errorMessage } from "../i18n";
 
 function availabilityClass(label) {
   return `status-pill status-${label.replace(/\s+/g, "-").toLowerCase()}`;
@@ -9,9 +10,10 @@ function conditionClass(condition) {
   return `condition-pill condition-${condition.toLowerCase()}`;
 }
 
-export default function ProductModal({ product, t, currency, onClose, onOrder }) {
+export default function ProductModal({ product, t, currency, onClose, onBuy }) {
   const [photoIndex, setPhotoIndex] = useState(0);
-  const [orderState, setOrderState] = useState("idle"); // idle | ordering | ordered | error
+  const [orderState, setOrderState] = useState("idle"); // idle | adding | added | error
+  const [orderError, setOrderError] = useState("");
   const [zoomed, setZoomed] = useState(false);
   const [zoomOrigin, setZoomOrigin] = useState({ x: 50, y: 50 });
 
@@ -25,12 +27,17 @@ export default function ProductModal({ product, t, currency, onClose, onOrder })
     setZoomed(false);
   }, [photoIndex]);
 
-  async function handleOrder() {
-    setOrderState("ordering");
+  // Buying is now "add to basket". If nobody is signed in, the parent opens the
+  // sign-in form and finishes this exact purchase once that succeeds — so the
+  // click is never lost.
+  async function handleBuy() {
+    setOrderState("adding");
+    setOrderError("");
     try {
-      await onOrder(product.id);
-      setOrderState("ordered");
-    } catch {
+      const outcome = await onBuy(product.id);
+      setOrderState(outcome === "deferred" ? "idle" : "added");
+    } catch (error) {
+      setOrderError(errorMessage(t, error));
       setOrderState("error");
     }
   }
@@ -63,7 +70,8 @@ export default function ProductModal({ product, t, currency, onClose, onOrder })
   if (!product) return null;
 
   const availabilityLabel = t.availability[product.availability] || product.availability;
-  const category = product.category.split(">").map((part) => part.trim()).at(-1);
+  const conditionLabel = t.condition[product.condition] || product.condition;
+  const category = product.category ? product.category.split(">").map((part) => part.trim()).at(-1) : "";
   const subtitle = [product.brand, product.model, category].filter(Boolean).join(" · ");
   const photos = product.images && product.images.length ? product.images : null;
 
@@ -98,7 +106,7 @@ export default function ProductModal({ product, t, currency, onClose, onOrder })
                 className="gallery-nav gallery-prev"
                 type="button"
                 onClick={() => setPhotoIndex((index) => (index - 1 + photos.length) % photos.length)}
-                aria-label="Previous photo"
+                aria-label={t.previousPhoto}
               >
                 ‹
               </button>
@@ -106,7 +114,7 @@ export default function ProductModal({ product, t, currency, onClose, onOrder })
                 className="gallery-nav gallery-next"
                 type="button"
                 onClick={() => setPhotoIndex((index) => (index + 1) % photos.length)}
-                aria-label="Next photo"
+                aria-label={t.nextPhoto}
               >
                 ›
               </button>
@@ -123,7 +131,7 @@ export default function ProductModal({ product, t, currency, onClose, onOrder })
                 className={index === photoIndex ? "product-modal-thumb-active" : ""}
                 onClick={() => setPhotoIndex(index)}
               >
-                <img src={url} alt={`${product.name} photo ${index + 1}`} />
+                <img src={url} alt={t.photoAlt(product.name, index + 1)} />
               </button>
             ))}
           </div>
@@ -132,7 +140,7 @@ export default function ProductModal({ product, t, currency, onClose, onOrder })
         <div className="product-modal-body">
           <div className="shop-card-badges">
             <span className={availabilityClass(product.availability)}>{availabilityLabel}</span>
-            {product.condition && <span className={conditionClass(product.condition)}>{product.condition}</span>}
+            {product.condition && <span className={conditionClass(product.condition)}>{conditionLabel}</span>}
           </div>
           <h2>{product.name}</h2>
           <p className="product-modal-brand">{subtitle}</p>
@@ -146,12 +154,12 @@ export default function ProductModal({ product, t, currency, onClose, onOrder })
             <button
               type="button"
               className="command-button"
-              onClick={handleOrder}
-              disabled={!product.inStock || orderState === "ordering"}
+              onClick={handleBuy}
+              disabled={!product.inStock || orderState === "adding"}
             >
-              {orderState === "ordering" ? t.ordering : orderState === "ordered" ? t.ordered : t.orderButton}
+              {orderState === "adding" ? t.adding : orderState === "added" ? t.addedToBasket : t.addToBasket}
             </button>
-            {orderState === "error" && <p className="order-error">{t.orderFailed}</p>}
+            {orderState === "error" && <p className="order-error">{orderError || t.orderFailed}</p>}
           </div>
           <p className="product-modal-description">{product.description}</p>
           <div className="product-modal-tags">

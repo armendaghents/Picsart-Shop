@@ -32,7 +32,7 @@ export default function FilterPopover({
       </label>
 
       <label className="filter-popover-field">
-        <span className="sr-only">Sort</span>
+        <span className="sr-only">{t.sort}</span>
         <select value={sort} onChange={(event) => onSortChange(event.target.value)}>
           <option value="relevance">{t.sortRelevance}</option>
           <option value="priceAsc">{t.sortPriceAsc}</option>

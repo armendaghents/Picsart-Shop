@@ -49,7 +49,7 @@ export default function InventoryResults({ items, total, query, sort, onSortChan
                 <p>{highlight(item.description, query)}</p>
                 <div className="meta-row">
                   <span>{item.sku}</span>
-                  <span>{item.category.split(">").map((part) => part.trim()).at(-1)}</span>
+                  {item.category && <span>{item.category.split(">").map((part) => part.trim()).at(-1)}</span>}
                   <span>{item.warehouse ? [item.warehouse, item.location].filter(Boolean).join(" · ") : "Unassigned"}</span>
                   <span className={availabilityClass(item.availability)}>{item.availability}</span>
                   {item.condition && <span className={conditionClass(item.condition)}>{item.condition}</span>}

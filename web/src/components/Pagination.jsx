@@ -20,17 +20,17 @@ function pageNumbers(current, total) {
   return withDots;
 }
 
-export default function Pagination({ page, totalPages, onPageChange }) {
+export default function Pagination({ t, page, totalPages, onPageChange }) {
   if (totalPages <= 1) return null;
 
   return (
-    <nav className="pagination" aria-label="Pagination">
+    <nav className="pagination" aria-label={t.pagination}>
       <button
         type="button"
         className="pagination-nav"
         onClick={() => onPageChange(page - 1)}
         disabled={page <= 1}
-        aria-label="Previous page"
+        aria-label={t.previousPage}
       >
         ‹
       </button>
@@ -58,7 +58,7 @@ export default function Pagination({ page, totalPages, onPageChange }) {
         className="pagination-nav"
         onClick={() => onPageChange(page + 1)}
         disabled={page >= totalPages}
-        aria-label="Next page"
+        aria-label={t.nextPage}
       >
         ›
       </button>

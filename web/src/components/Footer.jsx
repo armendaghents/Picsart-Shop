@@ -14,7 +14,7 @@ export default function Footer({ t }) {
       </div>
 
       <div className="site-footer-bottom">
-        <span>© {year} Picsart Shop. All rights reserved.</span>
+        <span>© {year} Picsart Shop. {t.rightsReserved}</span>
       </div>
     </footer>
   );

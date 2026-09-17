@@ -22,9 +22,9 @@ function monthLabel(date) {
   return date.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 }
 
-// ordered_at is stored as a SQLite UTC "YYYY-MM-DD HH:MM:SS" string.
-function formatTime(sqliteTimestamp) {
-  const date = new Date(`${sqliteTimestamp.replace(" ", "T")}Z`);
+// ordered_at is stored as a UTC "YYYY-MM-DD HH:MM:SS" string.
+function formatTime(timestamp) {
+  const date = new Date(`${timestamp.replace(" ", "T")}Z`);
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
@@ -133,6 +133,7 @@ export default function AnalyticsPanel() {
                         {order.category && (
                           <span>{order.category.split(">").map((part) => part.trim()).at(-1)}</span>
                         )}
+                        {order.quantity > 1 && <span>×{order.quantity}</span>}
                         <span>{formatMoney(order.price)}</span>
                         <span>{formatTime(order.orderedAt)}</span>
                       </div>

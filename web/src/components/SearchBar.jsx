@@ -99,7 +99,7 @@ export default function SearchBar({ t, query, onSearch, filtersOpen, onToggleFil
             <button
               className="icon-button subtle"
               type="button"
-              title="Clear search"
+              title={t.clearSearch}
               onClick={() => {
                 setDraft("");
                 runSearch("");
@@ -108,7 +108,7 @@ export default function SearchBar({ t, query, onSearch, filtersOpen, onToggleFil
               ×
             </button>
           )}
-          <button className="search-submit" type="button" title="Search" onClick={() => runSearch(draft)}>
+          <button className="search-submit" type="button" title={t.search} onClick={() => runSearch(draft)}>
             ⌕
           </button>
         </div>
