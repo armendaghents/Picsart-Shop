@@ -6,14 +6,28 @@
   --text: #201a2e;
   --muted: #786f8c;
   --line: #e4dced;
-  --accent: #9b1fce;
-  --accent-2: #0fc7bd;
-  --accent-3: #6a3fd1;
+  /* Sampled from picsart-logo.jpeg: magenta #d800c0, violet #7848d8, cyan
+     #00f0f0. The magenta is stepped down to #c209c1 so white text on it clears
+     4.5:1 — the logo's own value lands at 4.49:1, just under. */
+  --accent: #c209c1;
+  --accent-2: #00b8c4;
+  --accent-3: #7848d8;
   --success: #3f8f5c;
   --warn: #bd8a1f;
   --danger: #b3462f;
   --shadow: 0 14px 34px rgba(60, 20, 90, 0.1);
   --page-gradient: linear-gradient(180deg, #fbf9fe 0%, var(--bg) 45%, #f5eefb 100%);
+
+  /* The brand signature: one gradient, used for every primary action so the
+     shop reads as one thing rather than a collection of purple buttons. */
+  --brand-gradient: linear-gradient(120deg, #c209c1 0%, #7848d8 52%, #00b8c4 100%);
+  --brand-glow: 0 10px 26px -8px rgba(194, 9, 193, 0.55);
+
+  /* Rounder than a default admin tool, which is most of what separates a
+     playful consumer surface from a utilitarian one. */
+  --radius-card: 18px;
+  --radius-control: 12px;
+  --radius-media: 14px;
 }
 
 :root.dark {
@@ -24,14 +38,17 @@
   --text: #f1ecf8;
   --muted: #a89cc0;
   --line: #2e2645;
-  --accent: #d34fe8;
-  --accent-2: #2fe0d6;
+  /* Brighter on dark, where the light-mode magenta goes muddy. */
+  --accent: #ff4ae0;
+  --accent-2: #22e8e8;
   --accent-3: #9a6ef0;
   --success: #5cc78a;
   --warn: #d99a3a;
   --danger: #e0705a;
   --shadow: 0 18px 45px rgba(0, 0, 0, 0.6);
   --page-gradient: linear-gradient(180deg, #050308 0%, var(--bg) 45%, #030208 100%);
+  --brand-gradient: linear-gradient(120deg, #ff4ae0 0%, #9a6ef0 52%, #22e8e8 100%);
+  --brand-glow: 0 10px 30px -8px rgba(255, 74, 224, 0.45);
 }
 
 * {
@@ -151,6 +168,34 @@ button {
   font-size: 0.86rem;
 }
 
+/* Movement since the last recorded day. Sits between the figure and its
+   caption, and is absent entirely when there is no earlier day to compare
+   against. */
+.metric-delta {
+  /* Its own line: the caption below is inline, and without this the two run
+     together as "...since Sep 16Across all warehouses". */
+  display: block;
+  margin: 2px 0 1px;
+  font-size: 0.82rem;
+  font-style: normal;
+  font-weight: 600;
+  /* --success and --danger are already chosen for contrast in both themes,
+     and the arrow carries the same meaning for anyone who can't see colour. */
+  color: var(--muted);
+}
+
+.metric-delta-up {
+  color: var(--success);
+}
+
+.metric-delta-down {
+  color: var(--danger);
+}
+
+.metric-delta-flat {
+  font-weight: 500;
+}
+
 .workspace {
   min-width: 0;
   padding: 18px 22px 28px;
@@ -210,6 +255,17 @@ h3 {
 .text-button {
   border: 1px solid var(--line);
   color: var(--text);
+}
+
+/* Which admin is signed in. Only rendered when the console runs named
+   accounts, so the shared single login is unchanged. */
+.admin-whoami {
+  align-self: center;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .icon-button {
@@ -1059,6 +1115,10 @@ mark {
 }
 
 .shop-card {
+  /* Shared by the button's own size and by the hover tooltip, which is
+     positioned to stop above it rather than cover it. */
+  --card-add-height: 38px;
+  --card-add-gap: 10px;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -1080,7 +1140,9 @@ mark {
   position: absolute;
   left: 12px;
   right: 12px;
-  bottom: 12px;
+  /* Clears the Add to basket button instead of sitting on top of it, which
+     hid the card's primary action for as long as the pointer was over it. */
+  bottom: calc(12px + var(--card-add-height) + var(--card-add-gap));
   z-index: 3;
   opacity: 0;
   pointer-events: none;
@@ -1121,19 +1183,34 @@ mark {
 }
 
 .shop-card .product-art {
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 1;
   margin-bottom: 12px;
 }
 
-/* .shop-card .product-art (two classes) outranks the general
-   .product-art:has(img) reset below: :has()'s specificity comes from its
-   *argument* (img, a bare type selector), not from being a pseudo-class
-   itself, so it's weaker than an extra class. Without this, the fixed 16:9
-   ratio kept winning here and the photo (sized to its own aspect ratio)
-   quietly overflowed the tile and got clipped by overflow: hidden. */
+/* Every storefront tile is the same square box whether it holds a photo or the
+   icon placeholder, so all cards line up and their text starts at the same
+   height. The photo is scaled to fit *inside* that box rather than filling it,
+   so the whole product stays visible and nothing is cropped; a photo whose
+   shape doesn't match the square letterboxes against the backdrop below.
+   (This deliberately overrides the general .product-art:has(img) rule further
+   down, which sizes the tile from the photo and makes every tile a different
+   height. Two classes beat :has(img), whose specificity comes from its bare
+   type-selector argument.) */
 .shop-card .product-art:has(img) {
-  aspect-ratio: auto;
   display: block;
+  aspect-ratio: 1;
+  background: #fff;
+}
+
+.shop-card .product-art:has(img) img {
+  position: absolute;
+  inset: 6px;
+  width: auto;
+  height: auto;
+  max-width: calc(100% - 12px);
+  max-height: calc(100% - 12px);
+  margin: auto;
+  object-fit: contain;
 }
 
 .shop-card-body {
@@ -1317,6 +1394,91 @@ mark {
   font-weight: 600;
 }
 
+/* Recommendations inside the product modal: a dearer "better version" shelf
+   and a row of comparable products, both horizontally scrollable so a long
+   list never stretches the modal. */
+.product-recommendations {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.product-recommendations h3 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.recommendation-row {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+}
+
+.recommendation-card {
+  display: flex;
+  flex: 0 0 132px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.recommendation-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.recommendation-art {
+  width: 100%;
+}
+
+.recommendation-art span {
+  width: 34px;
+  height: 34px;
+  font-size: 0.95rem;
+}
+
+.recommendation-name {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.3;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.recommendation-price {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 0.85rem;
+  font-weight: 900;
+}
+
+.recommendation-delta {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.recommendation-stock {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Price range (dual-handle slider)                                       */
 /* ---------------------------------------------------------------------- */
@@ -1479,6 +1641,12 @@ mark {
 
 .search-anchor {
   position: relative;
+  max-width: 640px;
+  transition: max-width 0.2s ease;
+}
+
+.app-header-compact .search-anchor {
+  max-width: 480px;
 }
 
 .search-with-filters {
@@ -2400,6 +2568,122 @@ mark {
   color: var(--muted);
 }
 
+/* Add to basket, on the card ------------------------------------------------ */
+
+/* Buying looks the same wherever it is offered. Defined once so the card and
+   the modal cannot drift apart — the modal's .command-button is otherwise
+   styled background: var(--text), which renders it black. */
+.card-add,
+.product-modal-order .command-button,
+.search-submit {
+  border: 0;
+  background: var(--brand-gradient);
+  color: #fff;
+  font-weight: 700;
+}
+
+/* A gradient can't be interpolated between two values, so the hover state
+   brightens and lifts instead of cross-fading to another colour. */
+.card-add:hover:not(:disabled),
+.product-modal-order .command-button:hover:not(:disabled),
+.search-submit:hover:not(:disabled) {
+  filter: brightness(1.08);
+  box-shadow: var(--brand-glow);
+}
+
+.card-add:disabled,
+.product-modal-order .command-button:disabled {
+  border: 1px solid var(--line);
+  background: none;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.card-add {
+  width: 100%;
+  min-height: var(--card-add-height);
+  margin-top: var(--card-add-gap);
+  border-radius: 8px;
+  font-size: 0.86rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+
+/* Confirmation, shown for a moment after a successful add. Kept distinct from
+   the resting state so the change is noticed without the layout shifting. */
+.card-add-done,
+.card-add-done:disabled {
+  border-color: var(--success);
+  background: var(--success);
+  color: #fff;
+}
+
+.card-add-error {
+  margin: 6px 0 0;
+  color: var(--danger);
+  font-size: 0.76rem;
+}
+
+/* The footer is pushed to the bottom so every card's button sits on the same
+   line regardless of how long the description above it runs. */
+.shop-card-body {
+  flex: 1;
+}
+
+.shop-card-footer {
+  margin-top: auto;
+}
+
+/* Google sign-in ----------------------------------------------------------- */
+
+.auth-separator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0 12px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: lowercase;
+}
+
+.auth-separator::before,
+.auth-separator::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.auth-google {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.auth-google:hover {
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
+/* Google's brand guidelines require the mark keep its own colours, so it is
+   left untouched in both themes rather than inheriting currentColor. */
+.auth-google svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
 .code-input {
   font-size: 1.3rem !important;
   font-variant-numeric: tabular-nums;
@@ -2580,4 +2864,95 @@ mark {
 button.account-chip {
   border: 0;
   cursor: pointer;
+}
+
+
+/* ==========================================================================
+   Brand pass
+   --------------------------------------------------------------------------
+   Everything above styles the shop's structure; this layer gives it the
+   Picsart look. Two moves only, applied consistently:
+
+     * one gradient (magenta → violet → cyan, sampled from the logo) for the
+       brand mark and every primary action, so colour means "this is the thing
+       to press" rather than decorating at random;
+     * rounder geometry, which is most of what separates a playful consumer
+       surface from an admin tool.
+
+   Kept as its own section, and referring only to tokens, so the whole look can
+   be retuned from :root — or removed — without unpicking the rules above.
+   ========================================================================== */
+
+/* The wordmark carries the gradient itself. background-clip: text needs a
+   transparent fill, so the colour below is the fallback anywhere that isn't
+   supported and the mark simply stays magenta. */
+.brand strong {
+  color: var(--accent);
+  background: var(--brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  letter-spacing: -0.01em;
+}
+
+.brand-mark {
+  border-radius: var(--radius-control);
+  box-shadow: var(--brand-glow);
+}
+
+/* Rounder geometry ------------------------------------------------------- */
+
+.shop-card,
+.product-modal,
+.auth-modal,
+.cart-panel,
+.account-panel {
+  border-radius: var(--radius-card);
+}
+
+.shop-card .product-art,
+.product-art {
+  border-radius: var(--radius-media);
+}
+
+.search-box,
+.search-submit,
+.command-button,
+.card-add,
+.icon-button,
+.lang-select,
+.auth-google,
+.empty-state {
+  border-radius: var(--radius-control);
+}
+
+/* Depth in brand colour rather than neutral grey: a card lifting on hover
+   picks up a magenta cast instead of a black smudge. */
+.shop-card:hover {
+  box-shadow: 0 26px 60px -24px rgba(194, 9, 193, 0.42);
+}
+
+:root.dark .shop-card:hover {
+  box-shadow: 0 26px 60px -20px rgba(255, 74, 224, 0.3);
+}
+
+/* One visible, on-brand focus ring everywhere, replacing the browser default.
+   :focus-visible so it appears for keyboard users without ringing every mouse
+   click — the reason focus outlines usually get removed altogether. */
+:where(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The search field is the first thing on the page and the one control that
+   should look active before it is touched. */
+.search-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shop-card:hover {
+    transform: none;
+  }
 }

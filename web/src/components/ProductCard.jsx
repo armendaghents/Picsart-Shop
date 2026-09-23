@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatMoney } from "../currency";
+import { errorMessage } from "../i18n";
 
 function highlight(text, query) {
   if (!text) return text;
@@ -24,8 +25,38 @@ function conditionClass(condition) {
   return `condition-pill condition-${condition.toLowerCase()}`;
 }
 
-export default function ProductCard({ item, t, currency, query, onOpen }) {
+export default function ProductCard({ item, t, currency, query, onOpen, onAddToCart }) {
   const [photoIndex, setPhotoIndex] = useState(0);
+  const [orderState, setOrderState] = useState("idle"); // idle | adding | added | error
+  const [orderError, setOrderError] = useState("");
+  const resetTimer = useRef(null);
+
+  // The card stays on screen after a click, so the confirmation is a moment
+  // rather than a permanent state — unlike the modal, which is dismissed.
+  useEffect(() => () => clearTimeout(resetTimer.current), []);
+
+  async function handleAdd(event) {
+    // Without this the click also lands on the card and opens the modal.
+    event.stopPropagation();
+    clearTimeout(resetTimer.current);
+    setOrderState("adding");
+    setOrderError("");
+    try {
+      const outcome = await onAddToCart(item.id);
+      // "deferred" means nobody is signed in: the sign-in form has opened and
+      // will finish this exact add, so the card shouldn't claim success.
+      if (outcome === "deferred") {
+        setOrderState("idle");
+        return;
+      }
+      setOrderState("added");
+      resetTimer.current = setTimeout(() => setOrderState("idle"), 2000);
+    } catch (error) {
+      setOrderError(errorMessage(t, error));
+      setOrderState("error");
+      resetTimer.current = setTimeout(() => setOrderState("idle"), 4000);
+    }
+  }
   const availabilityLabel = t.availability[item.availability] || item.availability;
   const conditionLabel = t.condition[item.condition] || item.condition;
   const category = item.category ? item.category.split(">").map((part) => part.trim()).at(-1) : "";
@@ -72,6 +103,26 @@ export default function ProductCard({ item, t, currency, query, onOpen }) {
             {item.inStock ? t.inStockSuffix(item.availableQuantity) : t.unavailable}
           </span>
         </div>
+
+        {onAddToCart && (
+          <>
+            <button
+              className={`card-add${orderState === "added" ? " card-add-done" : ""}`}
+              type="button"
+              onClick={handleAdd}
+              disabled={!item.inStock || orderState === "adding"}
+            >
+              {orderState === "adding"
+                ? t.adding
+                : orderState === "added"
+                  ? t.addedToBasket
+                  : item.inStock
+                    ? t.addToBasket
+                    : t.unavailable}
+            </button>
+            {orderState === "error" && <p className="card-add-error">{orderError || t.orderFailed}</p>}
+          </>
+        )}
       </div>
       <div className="shop-card-tooltip" aria-hidden="true">
         <p>{item.description}</p>

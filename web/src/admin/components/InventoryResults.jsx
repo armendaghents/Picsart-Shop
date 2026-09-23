@@ -1,6 +1,10 @@
 import { highlight } from "../highlight.jsx";
 import Pagination from "../../components/Pagination";
 
+// The storefront runs in three languages; the admin console is English only, so
+// it supplies the screen-reader labels Pagination asks for directly.
+const PAGINATION_LABELS = { pagination: "Pagination", previousPage: "Previous page", nextPage: "Next page" };
+
 const formatMoney = (amount) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(amount || 0);
 
@@ -80,7 +84,7 @@ export default function InventoryResults({ items, total, query, sort, onSortChan
         </div>
       )}
 
-      <Pagination page={page} totalPages={totalPages} onPageChange={onPageChange} />
+      <Pagination t={PAGINATION_LABELS} page={page} totalPages={totalPages} onPageChange={onPageChange} />
     </section>
   );
 }

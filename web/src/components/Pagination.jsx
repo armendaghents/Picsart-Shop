@@ -20,7 +20,11 @@ function pageNumbers(current, total) {
   return withDots;
 }
 
-export default function Pagination({ t, page, totalPages, onPageChange }) {
+// `t` is optional. The storefront passes its translations; the admin console
+// has no translation layer and passes plain English. Defaulting to {} means a
+// caller that forgets it loses an aria-label rather than throwing during
+// render — which, in React, takes the whole page down with it.
+export default function Pagination({ t = {}, page, totalPages, onPageChange }) {
   if (totalPages <= 1) return null;
 
   return (

@@ -1,6 +1,24 @@
-import { logout } from "../api";
+import { useEffect, useState } from "react";
+
+import { fetchAdminSession, logout } from "../api";
 
 export default function AdminHeader({ dark, onToggleDark, onAddItem }) {
+  // Empty unless the console is running named accounts, so the single shared
+  // login looks exactly as it did before.
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAdminSession()
+      .then((session) => {
+        if (!cancelled) setUsername(session.username || "");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <header className="topbar">
       <div>
@@ -14,6 +32,7 @@ export default function AdminHeader({ dark, onToggleDark, onAddItem }) {
         <button className="icon-button" type="button" title="Toggle theme" onClick={onToggleDark}>
           {dark ? "☀" : "◐"}
         </button>
+        {username ? <span className="admin-whoami" title="Signed in as">{username}</span> : null}
         <button className="text-button" type="button" onClick={logout}>
           Log out
         </button>

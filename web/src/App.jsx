@@ -37,13 +37,16 @@ export default function App() {
   const [lang, setLang] = useState(() => readStored("atlas_lang", "en"));
   const [currency, setCurrency] = useState(() => readStored("atlas_currency", "USD"));
   const [dark, setDark] = useState(false);
-  const compact = useScrolled(8);
+  // Compacts as soon as the page moves, and expands again only back at the very
+  // top — the gap is what stops the header oscillating. See useScrolled.
+  const compact = useScrolled(8, 0);
 
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All");
   const [sort, setSort] = useState(DEFAULT_SORT);
   const [inStockOnly, setInStockOnly] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersAnchorRef = useRef(null);
 
   const [categories, setCategories] = useState([]);
   const [priceBounds, setPriceBounds] = useState({ min: 0, max: 10000 });
@@ -61,6 +64,7 @@ export default function App() {
   const [cartBusy, setCartBusy] = useState(false);
   const [cartOpen, setCartOpen] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
+  const [authError, setAuthError] = useState("");
   const [accountOpen, setAccountOpen] = useState(false);
   // The product someone tried to buy while signed out. Held here so the
   // purchase completes by itself once they finish signing in.
@@ -107,6 +111,26 @@ export default function App() {
     };
   }, [user]);
 
+  // Google sign-in returns by redirect, so a failure can only be reported in the
+  // URL. Read it once, reopen the modal with the reason, and strip the parameter
+  // so a refresh doesn't show the same message again.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const reason = params.get("auth_error");
+    if (!reason) return;
+    // Cancelling on Google's consent screen is a choice, not an error.
+    if (reason !== "cancelled") {
+      setAuthError(t.googleSignInFailed);
+      setAuthOpen(true);
+    }
+    params.delete("auth_error");
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+    // Runs once on load: t is read for the message only, and the language
+    // cannot have changed before this point.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     localStorage.setItem("atlas_currency", currency);
   }, [currency]);
@@ -114,6 +138,24 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
+
+  useEffect(() => {
+    if (!filtersOpen) return;
+    function handlePointerDown(event) {
+      if (filtersAnchorRef.current && !filtersAnchorRef.current.contains(event.target)) {
+        setFiltersOpen(false);
+      }
+    }
+    function handleKeyDown(event) {
+      if (event.key === "Escape") setFiltersOpen(false);
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [filtersOpen]);
 
   useEffect(() => {
     fetchFacets()
@@ -282,7 +324,7 @@ export default function App() {
           onSignOut={handleSignOut}
           onOpenAccount={() => setAccountOpen(true)}
           searchSlot={
-            <div className="search-anchor">
+            <div className="search-anchor" ref={filtersAnchorRef}>
               <SearchBar
                 t={t}
                 query={query}
@@ -314,7 +356,14 @@ export default function App() {
 
       <p className="shop-result-summary shop-result-summary-standalone">{summary}</p>
 
-      <ProductGrid items={items} t={t} currency={currency} query={query} onOpenProduct={setSelectedProductId} />
+      <ProductGrid
+        items={items}
+        t={t}
+        currency={currency}
+        query={query}
+        onOpenProduct={setSelectedProductId}
+        onAddToCart={handleBuy}
+      />
 
       <Pagination t={t} page={page} totalPages={totalPages} onPageChange={changePage} />
 
@@ -324,13 +373,16 @@ export default function App() {
         currency={currency}
         onClose={() => setSelectedProductId(null)}
         onBuy={handleBuy}
+        onOpenProduct={setSelectedProductId}
       />
 
       {authOpen && (
         <AuthModal
           t={t}
+          initialError={authError}
           onClose={() => {
             setAuthOpen(false);
+            setAuthError("");
             setPendingBuyId(null);
           }}
           onAuthenticated={handleAuthenticated}

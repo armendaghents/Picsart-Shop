@@ -25,6 +25,34 @@ export function makeJar() {
 
 export function makeClient(base, logPath) {
   return {
+    base,
+
+    // Redirects are followed automatically by fetch, which would hide the very
+    // thing a redirect-based flow needs asserting. This returns the 302 itself.
+    raw(path, { headers = {} } = {}) {
+      return fetch(base + path, { method: "GET", headers, redirect: "manual" });
+    },
+
+    // Multipart, for the admin photo upload. fetch builds the boundary itself,
+    // so Content-Type is deliberately not set here.
+    async upload(jar, path, field, files) {
+      const form = new FormData();
+      for (const [name, bytes] of files) {
+        // The server filters on MIME type, and a Blob built without one arrives
+        // as application/octet-stream and is refused.
+        const type = name.endsWith(".png") ? "image/png" : name.endsWith(".webp") ? "image/webp" : "image/jpeg";
+        form.append(field, new Blob([bytes], { type }), name);
+      }
+      const csrf = jar.get("atlas_csrf");
+      const response = await fetch(base + path, {
+        method: "POST",
+        headers: { cookie: jar.header(), ...(csrf ? { "x-csrf-token": decodeURIComponent(csrf) } : {}) },
+        body: form,
+      });
+      jar.absorb(response);
+      return { status: response.status, data: await response.json().catch(() => ({})) };
+    },
+
     async call(jar, method, path, body, extraHeaders = {}) {
       const headers = { cookie: jar.header(), ...extraHeaders };
       if (body !== undefined) headers["Content-Type"] = "application/json";

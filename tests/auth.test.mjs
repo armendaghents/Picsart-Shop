@@ -6,7 +6,7 @@ import { makeJar, makeRecorder } from "./helpers.mjs";
 import { totpCodeAt } from "../lib/totp.js";
 
 export default async function run(client) {
-  const { call, latestCodeFor, logContains } = client;
+  const { call, latestCodeFor, logContains, raw } = client;
   const t = makeRecorder("account lifecycle");
   const email = `life${Date.now()}@example.com`;
   const jar = makeJar();
@@ -145,6 +145,46 @@ export default async function run(client) {
   t.check("replaying a spent refresh token is rejected", replay.status === 401);
   r = await call(jar2fa, "POST", "/api/auth/refresh");
   t.check("...and it revokes the whole session family", r.status === 401, `got ${r.status}`);
+
+  // Everything below stops before the token exchange, so nothing here talks to
+  // Google and the suite still runs with no network.
+  t.section("sign in with Google");
+  r = await call(jar, "GET", "/api/auth/providers");
+  t.check("the storefront is told Google sign-in is available", r.data.google === true, JSON.stringify(r.data));
+
+  let redirect = await raw("/api/auth/google");
+  const location = redirect.headers.get("location") || "";
+  const stateCookie = (redirect.headers.getSetCookie?.() || []).find((c) => c.startsWith("atlas_oauth_state="));
+  t.check("starting the flow redirects to Google", redirect.status === 302 && location.startsWith("https://accounts.google.com/"), `${redirect.status} ${location.slice(0, 60)}`);
+  t.check("...asking only for identity, not offline access",
+    location.includes("scope=openid+email+profile") && location.includes("access_type=online"), location);
+  t.check("...and pins the attempt to this browser with a state cookie", Boolean(stateCookie), String(stateCookie));
+  // Strict would be withheld on the cross-site navigation back from Google,
+  // which would break every sign-in — so this attribute is load-bearing.
+  t.check("...sent SameSite=Lax and HttpOnly so the callback can read it",
+    /SameSite=Lax/i.test(stateCookie || "") && /HttpOnly/i.test(stateCookie || ""), String(stateCookie));
+
+  const issuedState = decodeURIComponent((stateCookie || "").split(";")[0].split("=")[1] || "");
+  t.check("the state in the cookie is the state sent to Google",
+    Boolean(issuedState) && new URL(location).searchParams.get("state") === issuedState);
+
+  redirect = await raw(`/api/auth/google/callback?code=abc&state=${encodeURIComponent(issuedState)}`);
+  t.check("a callback with no state cookie is refused",
+    (redirect.headers.get("location") || "").includes("auth_error=bad_state"), redirect.headers.get("location"));
+
+  redirect = await raw("/api/auth/google/callback?code=abc&state=not-the-right-one", {
+    headers: { cookie: `atlas_oauth_state=${issuedState}` },
+  });
+  t.check("a callback whose state doesn't match the cookie is refused",
+    (redirect.headers.get("location") || "").includes("auth_error=bad_state"), redirect.headers.get("location"));
+
+  redirect = await raw("/api/auth/google/callback?error=access_denied&state=x");
+  t.check("pressing Cancel on Google comes back quietly, not as an error",
+    (redirect.headers.get("location") || "").includes("auth_error=cancelled"), redirect.headers.get("location"));
+
+  redirect = await raw("/api/auth/google/callback");
+  t.check("a callback carrying no code at all is refused",
+    (redirect.headers.get("location") || "").includes("auth_error=invalid_response"), redirect.headers.get("location"));
 
   t.section("security notifications");
   t.check("new sign-in notification sent", logContains("New sign-in to your Picsart Shop account"));

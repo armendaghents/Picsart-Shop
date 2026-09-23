@@ -1,6 +1,6 @@
 import ProductCard from "./ProductCard";
 
-export default function ProductGrid({ items, t, currency, query, onOpenProduct }) {
+export default function ProductGrid({ items, t, currency, query, onOpenProduct, onAddToCart }) {
   if (!items.length) {
     return <div className="empty-state">{t.emptyState}</div>;
   }
@@ -8,7 +8,15 @@ export default function ProductGrid({ items, t, currency, query, onOpenProduct }
   return (
     <section className="shop-results" aria-label={t.products}>
       {items.map((item) => (
-        <ProductCard key={item.id} item={item} t={t} currency={currency} query={query} onOpen={onOpenProduct} />
+        <ProductCard
+          key={item.id}
+          item={item}
+          t={t}
+          currency={currency}
+          query={query}
+          onOpen={onOpenProduct}
+          onAddToCart={onAddToCart}
+        />
       ))}
     </section>
   );

@@ -54,6 +54,17 @@ import {
   otpauthUrl,
   verifyTotp,
 } from "./lib/totp.js";
+import { describeUpload, normalizeUpload } from "./lib/images.js";
+import {
+  authorizationUrl,
+  callbackUrl,
+  createState,
+  exchangeCodeForProfile,
+  googleIsConfigured,
+  STATE_COOKIE,
+  STATE_TTL_SECONDS,
+  statesMatch,
+} from "./lib/oauth.js";
 import {
   newSignInEmail,
   passwordChangedEmail,
@@ -65,6 +76,19 @@ import {
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
+
+// Behind a reverse proxy every request arrives from the proxy, so request.ip is
+// the proxy's address and X-Forwarded-For is whatever the client sent — which
+// would make the rate limits, the lockout and the admin IP allowlist both
+// useless and trivially spoofable. Set TRUST_PROXY to the number of proxies in
+// front of this server (usually 1) so Express takes the right hop, and leave it
+// unset when nothing is in front.
+const TRUST_PROXY = process.env.TRUST_PROXY;
+if (TRUST_PROXY) {
+  app.set("trust proxy", /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY);
+}
+// Don't advertise what we are running.
+app.disable("x-powered-by");
 
 // Express 4 does not catch exceptions thrown inside async handlers: an
 // unhandled rejection in any single route takes the entire process down, so one
@@ -123,23 +147,279 @@ const upload = multer({
 });
 
 // ---------------------------------------------------------------------------
-// Admin authentication — a single shared password (set ADMIN_PASSWORD in .env)
-// gates the admin console and every admin API route. Sessions are an
-// in-memory token set, which is enough for a single small team; if you need
-// multiple staff accounts or roles later, swap this for real user rows +
-// hashed passwords.
+// Admin authentication
+//
+// The console can rewrite the catalogue and read every order, so it is held to
+// a higher bar than a customer account. What each layer is for:
+//
+//   * ADMIN_IP_ALLOWLIST — when set, admin requests from anywhere else are
+//     refused before authentication runs at all. Nothing else here matters to
+//     someone who cannot reach the endpoint in the first place.
+//   * The password is never held in memory in clear: ADMIN_PASSWORD_HASH holds
+//     a scrypt hash, and a plain ADMIN_PASSWORD is hashed at boot and then
+//     dropped from the environment.
+//   * Online guessing — per-address and process-wide rate limits, plus a
+//     lockout that doubles with each run of failures. Every attempt pays the
+//     full scrypt cost, so a near miss and a wild guess take the same time.
+//   * Password theft — with ADMIN_TOTP_SECRET set, a six-digit code from an
+//     authenticator app is required too, so the password alone buys nothing.
+//   * Session theft — the cookie is HttpOnly, SameSite=Strict and Secure off
+//     localhost; the server keeps only a SHA-256 of the token; and each session
+//     is pinned to the network and user agent that created it.
+//   * CSRF — every unsafe admin request carries the same double-submit token
+//     the customer API uses.
+//   * Stale sessions — 30 minutes idle or 8 hours absolute, whichever comes
+//     first, and the cookie itself dies with the browser.
+//
+// Run `node scripts/admin-credentials.mjs` to generate the hash and the
+// authenticator secret.
 // ---------------------------------------------------------------------------
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "changeme";
-const SESSION_COOKIE = "atlas_session";
-const SESSION_MAX_AGE_MS = 8 * 60 * 60 * 1000; // 8 hours
-const sessions = new Map(); // token -> expiresAt
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
-if (!process.env.ADMIN_PASSWORD) {
-  console.warn(
-    "WARNING: ADMIN_PASSWORD is not set in .env — using the default password 'changeme'. Set a real password before deploying."
-  );
+const SESSION_COOKIE = "atlas_session";
+const ADMIN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const ADMIN_ABSOLUTE_TIMEOUT_MS = 8 * 60 * 60 * 1000;
+
+// Consecutive failures from one address before it is locked out, and how long
+// that lockout lasts (doubling each further failure, up to the cap).
+const ADMIN_LOCKOUT_AFTER = 5;
+const ADMIN_LOCKOUT_BASE_MS = 60 * 1000;
+const ADMIN_LOCKOUT_MAX_MS = 60 * 60 * 1000;
+
+const sessions = new Map(); // sha256(token) -> { username, idleExpiresAt, absoluteExpiresAt, network, agent }
+// Keyed by account *and* address, not by address alone. Two admins behind one
+// office IP then can't lock each other out with their own typos, and nobody can
+// lock a colleague out of the office by guessing their name from the outside.
+const adminFailures = new Map(); // "username|ip" -> { count, lockedUntil }
+
+// ---------------------------------------------------------------------------
+// Admin accounts
+//
+// Two shapes, because a one-person shop and a two-person shop want different
+// things:
+//
+//   ADMIN_USERS=anna,bob   named accounts. Each has its own password hash and
+//                          its own authenticator secret, so the log says who
+//                          signed in and removing one person leaves the other
+//                          untouched:
+//                            ADMIN_ANNA_PASSWORD_HASH=...
+//                            ADMIN_ANNA_TOTP_SECRET=...
+//
+//   (unset)                the single shared login, from ADMIN_PASSWORD_HASH /
+//                          ADMIN_PASSWORD / ADMIN_TOTP_SECRET. No username is
+//                          asked for.
+//
+// Generate either with:  node scripts/admin-credentials.mjs --user anna
+// ---------------------------------------------------------------------------
+const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+
+function normalizeUsername(value) {
+  return String(value ?? "").trim().toLowerCase();
 }
 
+// anna -> ADMIN_ANNA_..., first.last -> ADMIN_FIRST_LAST_...
+function envKeyFor(username, suffix) {
+  return `ADMIN_${username.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_${suffix}`;
+}
+
+const adminAccounts = new Map(); // username -> { username, passwordHash, totpSecret }
+
+async function loadAdminAccount(username, { hashKey, passwordKey, totpKey, label }) {
+  let passwordHash = (process.env[hashKey] || "").trim() || null;
+  const plain = (process.env[passwordKey] || "").trim();
+
+  if (!passwordHash) {
+    if (IS_PRODUCTION && (!plain || plain === "changeme")) {
+      console.error(
+        `FATAL: ${label} has no credentials. Set ${hashKey} (preferred) or a real ${passwordKey} ` +
+          `before running with NODE_ENV=production.\n       Generate one with:  node scripts/admin-credentials.mjs`
+      );
+      process.exit(1);
+    }
+    if (!plain) {
+      console.warn(
+        `WARNING: ${passwordKey} is not set — ${label} falls back to the development password 'changeme'. ` +
+          "The server refuses to start this way when NODE_ENV=production."
+      );
+    }
+    // Derive the hash once, then forget the clear password: from here on a heap
+    // dump or a stray console.log(process.env) gives up nothing usable.
+    passwordHash = await hashPassword(plain || "changeme");
+  }
+  delete process.env[passwordKey];
+
+  const totpSecret = (process.env[totpKey] || "").trim() || null;
+  if (IS_PRODUCTION && !totpSecret) {
+    console.warn(
+      `WARNING: ${totpKey} is not set — ${label} is guarded by a password alone. ` +
+        "Run `node scripts/admin-credentials.mjs` to enrol an authenticator app."
+    );
+  }
+  adminAccounts.set(username, { username, passwordHash, totpSecret });
+}
+
+const declaredAdmins = (process.env.ADMIN_USERS || "")
+  .split(",")
+  .map(normalizeUsername)
+  .filter(Boolean);
+
+// With no ADMIN_USERS the console keeps its single unnamed login, so an
+// existing .env and the login form both carry on working unchanged.
+const ADMIN_SINGLE_USER = "admin";
+const ADMIN_NAMED_ACCOUNTS = declaredAdmins.length > 0;
+
+if (ADMIN_NAMED_ACCOUNTS) {
+  for (const username of declaredAdmins) {
+    if (!USERNAME_PATTERN.test(username)) {
+      console.error(
+        `FATAL: "${username}" in ADMIN_USERS is not a usable name. Use letters, digits, dot, dash or ` +
+          "underscore, starting with a letter or digit, at most 32 characters."
+      );
+      process.exit(1);
+    }
+    if (adminAccounts.has(username)) continue;
+    await loadAdminAccount(username, {
+      hashKey: envKeyFor(username, "PASSWORD_HASH"),
+      passwordKey: envKeyFor(username, "PASSWORD"),
+      totpKey: envKeyFor(username, "TOTP_SECRET"),
+      label: `admin '${username}'`,
+    });
+  }
+  console.log(`[auth] admin accounts: ${[...adminAccounts.keys()].join(", ")}`);
+} else {
+  await loadAdminAccount(ADMIN_SINGLE_USER, {
+    hashKey: "ADMIN_PASSWORD_HASH",
+    passwordKey: "ADMIN_PASSWORD",
+    totpKey: "ADMIN_TOTP_SECRET",
+    label: "the admin console",
+  });
+}
+
+// Someone submitting an unknown username must wait exactly as long, and be told
+// exactly as little, as someone submitting a real one with the wrong password.
+// Verifying against this throwaway hash costs the same scrypt work as the real
+// thing, so the response time never says which usernames exist.
+const DECOY_PASSWORD_HASH = await hashPassword(crypto.randomBytes(32).toString("hex"));
+
+function lookupAdminAccount(submitted) {
+  if (!ADMIN_NAMED_ACCOUNTS) return adminAccounts.get(ADMIN_SINGLE_USER);
+  return adminAccounts.get(normalizeUsername(submitted)) || null;
+}
+
+// The login form only needs to know whether to draw the code box; which
+// accounts exist is not something it is told.
+const ADMIN_TOTP_IN_USE = [...adminAccounts.values()].some((account) => account.totpSecret);
+
+// ---------------------------------------------------------------------------
+// Where an admin request is allowed to come from
+// ---------------------------------------------------------------------------
+const ADMIN_IP_ALLOWLIST = (process.env.ADMIN_IP_ALLOWLIST || "")
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter(Boolean);
+
+// Express reports an IPv4 client as ::ffff:1.2.3.4 when the socket is IPv6.
+function normalizeIp(value) {
+  const ip = String(value || "");
+  return ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+}
+
+// Pinning a session to an exact address looks stronger than it is: one machine
+// legitimately changes address all the time. `localhost` resolves to both ::1
+// and 127.0.0.1, and a browser will use either from one connection to the next
+// — so an exact pin drops the session halfway through loading the console.
+// Wi-Fi to LTE, or any proxy with several egress addresses, does the same in
+// production.
+//
+// So the pin is to the surrounding network instead: a /24 for IPv4, a /64 for
+// IPv6, and all loopback addresses treated as one. A cookie exfiltrated to some
+// other network is still refused, which is the case worth catching, while an
+// admin who stays where they are keeps their session.
+//
+// Set ADMIN_PIN_SESSION_NETWORK=off to pin on the user agent alone.
+const PIN_SESSION_NETWORK = (process.env.ADMIN_PIN_SESSION_NETWORK || "on").toLowerCase() !== "off";
+
+function sessionNetwork(request) {
+  if (!PIN_SESSION_NETWORK) return "any";
+  const ip = normalizeIp(request.ip);
+  if (ip === "::1" || ip === "" || /^127\./.test(ip)) return "loopback";
+  if (ip.includes(":")) return ip.split(":").slice(0, 4).join(":"); // /64
+  const octets = ip.split(".");
+  return octets.length === 4 ? octets.slice(0, 3).join(".") : ip; // /24
+}
+
+function ipv4ToInt(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const octet = Number(part);
+    if (octet > 255) return null;
+    value = value * 256 + octet;
+  }
+  return value;
+}
+
+// Exact addresses of either family, plus IPv4 CIDR ranges — enough to say "the
+// office" or "the VPN" without taking on a dependency.
+function ipMatchesRule(ip, rule) {
+  if (!rule.includes("/")) return ip === normalizeIp(rule);
+  const [network, bitsText] = rule.split("/");
+  const bits = Number(bitsText);
+  const networkInt = ipv4ToInt(normalizeIp(network));
+  const ipInt = ipv4ToInt(ip);
+  if (networkInt === null || ipInt === null) return false;
+  if (!Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+  if (bits === 0) return true;
+  const mask = (0xffffffff << (32 - bits)) >>> 0;
+  return ((ipInt & mask) >>> 0) === ((networkInt & mask) >>> 0);
+}
+
+function adminNetworkAllowed(request) {
+  if (!ADMIN_IP_ALLOWLIST.length) return true;
+  const ip = normalizeIp(request.ip);
+  return ADMIN_IP_ALLOWLIST.some((rule) => ipMatchesRule(ip, rule));
+}
+
+// 404 rather than 403: an address that is not allowed learns nothing, not even
+// that there is a console here to attack.
+function requireAdminNetwork(request, response, next) {
+  if (adminNetworkAllowed(request)) return next();
+  console.warn(
+    `[admin] blocked ${request.method} ${request.originalUrl} from ${normalizeIp(request.ip)} — not in ADMIN_IP_ALLOWLIST`
+  );
+  return response.status(404).type("text/plain").send("Not found");
+}
+
+// ---------------------------------------------------------------------------
+// Failed-attempt lockout
+// ---------------------------------------------------------------------------
+// An unknown username is folded into one bucket per address, so someone
+// submitting random names cannot grow this map without bound.
+function adminFailureKey(username, ip) {
+  return `${username || "?"}|${ip}`;
+}
+
+function adminLockRemainingMs(key) {
+  const record = adminFailures.get(key);
+  return record ? Math.max(0, record.lockedUntil - Date.now()) : 0;
+}
+
+function recordAdminFailure(key) {
+  const record = adminFailures.get(key) || { count: 0, lockedUntil: 0 };
+  record.count += 1;
+  if (record.count >= ADMIN_LOCKOUT_AFTER) {
+    const overshoot = record.count - ADMIN_LOCKOUT_AFTER;
+    record.lockedUntil = Date.now() + Math.min(ADMIN_LOCKOUT_BASE_MS * 2 ** overshoot, ADMIN_LOCKOUT_MAX_MS);
+  }
+  adminFailures.set(key, record);
+  return record;
+}
+
+// ---------------------------------------------------------------------------
+// Cookies and sessions
+// ---------------------------------------------------------------------------
 function parseCookies(header) {
   const cookies = {};
   (header || "").split(";").forEach((pair) => {
@@ -152,32 +432,110 @@ function parseCookies(header) {
   return cookies;
 }
 
-function isAuthed(request) {
-  const cookies = parseCookies(request.headers.cookie);
-  const token = cookies[SESSION_COOKIE];
-  if (!token || !sessions.has(token)) return false;
-  const expiresAt = sessions.get(token);
-  if (Date.now() > expiresAt) {
-    sessions.delete(token);
-    return false;
+function hashSessionToken(token) {
+  return crypto.createHash("sha256").update(String(token)).digest("hex");
+}
+
+function agentFingerprint(request) {
+  return crypto.createHash("sha256").update(String(request.headers["user-agent"] || "")).digest("hex");
+}
+
+function createAdminSession(request, username) {
+  const token = crypto.randomBytes(32).toString("base64url");
+  const now = Date.now();
+  // Only the hash is stored. The value in the cookie never touches this map,
+  // so a heap dump or a leaked log line cannot be replayed as a session.
+  sessions.set(hashSessionToken(token), {
+    username,
+    idleExpiresAt: now + ADMIN_IDLE_TIMEOUT_MS,
+    absoluteExpiresAt: now + ADMIN_ABSOLUTE_TIMEOUT_MS,
+    network: sessionNetwork(request),
+    agent: agentFingerprint(request),
+  });
+  return token;
+}
+
+// Returns the live session and slides the idle window forward, or null.
+// A pin mismatch deletes the session outright instead of just refusing this one
+// request: a cookie arriving from somewhere else means the real one is already
+// in the wrong hands.
+function readAdminSession(request) {
+  const token = parseCookies(request.headers.cookie)[SESSION_COOKIE];
+  if (!token) return null;
+  const key = hashSessionToken(token);
+  const session = sessions.get(key);
+  if (!session) return null;
+
+  const now = Date.now();
+  if (now > session.idleExpiresAt || now > session.absoluteExpiresAt) {
+    sessions.delete(key);
+    return null;
   }
-  return true;
+  if (session.network !== sessionNetwork(request) || session.agent !== agentFingerprint(request)) {
+    console.warn(
+      `[admin] session cookie presented from ${normalizeIp(request.ip)} (network ${sessionNetwork(request)}) ` +
+        `but was issued to network ${session.network} — session destroyed`
+    );
+    sessions.delete(key);
+    return null;
+  }
+  session.idleExpiresAt = Math.min(now + ADMIN_IDLE_TIMEOUT_MS, session.absoluteExpiresAt);
+  return session;
 }
 
+function isAuthed(request) {
+  return readAdminSession(request) !== null;
+}
+
+// The whole gate for an admin route: right network, live session, and — for
+// anything that changes state — a matching CSRF token.
 function requireAdmin(request, response, next) {
-  if (isAuthed(request)) return next();
-  response.status(401).json({ error: "unauthorized", message: "Admin login required." });
+  if (!adminNetworkAllowed(request)) {
+    return response.status(404).json({ error: "not_found" });
+  }
+  const session = readAdminSession(request);
+  if (!session) {
+    return response.status(401).json({ error: "unauthorized", message: "Admin login required." });
+  }
+  // Read back by the access log, so every admin request records who made it.
+  request.admin = { username: session.username };
+  return requireCsrf(request, response, next);
 }
 
-function setSessionCookie(response, token) {
-  response.setHeader(
+// Expired entries are dropped on access, but a session that is never touched
+// again would otherwise sit in the map for the life of the process.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, session] of sessions) {
+    if (now > session.idleExpiresAt || now > session.absoluteExpiresAt) sessions.delete(key);
+  }
+  for (const [key, record] of adminFailures) {
+    if (now > record.lockedUntil + ADMIN_LOCKOUT_MAX_MS) adminFailures.delete(key);
+  }
+}, 5 * 60 * 1000).unref();
+
+function setSessionCookie(response, request, token) {
+  response.append(
     "Set-Cookie",
-    `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}`
+    serializeCookie(
+      SESSION_COOKIE,
+      token,
+      // persistent: false omits Max-Age, so the cookie dies with the browser.
+      // The server-side idle timeout is the real clock either way.
+      cookieAttributes({ secure: isSecureRequest(request), persistent: false, sameSite: "Strict" })
+    )
   );
 }
 
-function clearSessionCookie(response) {
-  response.setHeader("Set-Cookie", `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`);
+function clearSessionCookie(response, request) {
+  response.append(
+    "Set-Cookie",
+    serializeCookie(
+      SESSION_COOKIE,
+      "",
+      cookieAttributes({ secure: isSecureRequest(request), maxAgeSeconds: 0, sameSite: "Strict" })
+    )
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -396,34 +754,111 @@ app.use((request, response, next) => {
   const start = Date.now();
   response.on("finish", () => {
     const ms = Date.now() - start;
-    console.log(`${request.method} ${request.originalUrl} ${response.statusCode} ${ms}ms`);
+    // Admin requests carry the account that made them, so the log answers
+    // "who changed this?" and not merely "something changed".
+    const who = request.admin ? ` [admin ${request.admin.username}]` : "";
+    console.log(`${request.method} ${request.originalUrl} ${response.statusCode} ${ms}ms${who}`);
   });
   next();
 });
 
-app.post("/api/admin/login", (request, response) => {
-  const { password } = request.body || {};
-  if (typeof password === "string" && password.length && password === ADMIN_PASSWORD) {
-    const token = crypto.randomBytes(24).toString("hex");
-    sessions.set(token, Date.now() + SESSION_MAX_AGE_MS);
-    setSessionCookie(response, token);
-    console.log(`[auth] admin login succeeded from ${request.ip}`);
-    return response.json({ ok: true });
+// Rate limits sit in front of the lockout so that a distributed attempt still
+// runs into a process-wide ceiling, not just a per-address one.
+app.post("/api/admin/login", requireAdminNetwork, requireCsrf, async (request, response) => {
+  const ip = normalizeIp(request.ip);
+  const { username, password, code } = request.body || {};
+
+  // Resolved before the lockout check so the lockout can be scoped to this
+  // account. An unknown name shares one bucket per address (see
+  // adminFailureKey), which is what stops the map growing without bound.
+  const account = lookupAdminAccount(username);
+  const failureKey = adminFailureKey(account?.username, ip);
+  const who = ADMIN_NAMED_ACCOUNTS ? `'${normalizeUsername(username) || "?"}' ` : "";
+
+  const lockedFor = adminLockRemainingMs(failureKey);
+  if (lockedFor > 0) {
+    const seconds = Math.ceil(lockedFor / 1000);
+    response.set("Retry-After", String(seconds));
+    console.warn(`[auth] admin ${who}login refused from ${ip} — locked out for another ${seconds}s`);
+    return response.status(429).json({
+      ok: false,
+      error: "locked_out",
+      retryAfter: seconds,
+      message: `Too many failed attempts. Try again in ${seconds} second${seconds === 1 ? "" : "s"}.`,
+    });
   }
-  console.warn(`[auth] admin login failed from ${request.ip}`);
-  response.status(401).json({ ok: false, message: "Incorrect password." });
+
+  // Three ceilings, narrowest first. The per-account one is what a single admin
+  // can spend on their own; the per-address one is wide enough for every admin
+  // in one office to spend theirs without touching a colleague's, but still
+  // catches one address spraying many names; the global one is the backstop.
+  // `||` short-circuits, so a request stopped by the first never consumes the
+  // budgets behind it.
+  if (
+    !rateLimit(`admin-login-account:${failureKey}`, 20, 15 * 60 * 1000) ||
+    !rateLimit(`admin-login-ip:${ip}`, 40, 15 * 60 * 1000) ||
+    !rateLimit("admin-login-global", 60, 15 * 60 * 1000)
+  ) {
+    console.warn(`[auth] admin ${who}login rate limited from ${ip}`);
+    return response
+      .status(429)
+      .json({ ok: false, error: "rate_limited", message: "Too many attempts. Try again in a few minutes." });
+  }
+
+  // An unknown username still pays the full scrypt cost, against a hash nobody
+  // holds the password for. Every branch below therefore takes the same time
+  // and returns the same message, so this never becomes a way to discover which
+  // accounts exist.
+  const passwordOk =
+    typeof password === "string" &&
+    password.length > 0 &&
+    (await verifyPassword(password, account?.passwordHash ?? DECOY_PASSWORD_HASH)) &&
+    Boolean(account);
+  const codeOk = !account?.totpSecret || verifyTotp(account.totpSecret, code);
+
+  if (!passwordOk || !codeOk) {
+    const record = recordAdminFailure(failureKey);
+    console.warn(
+      `[auth] admin ${who}login failed from ${ip} (${record.count} consecutive)${
+        record.lockedUntil > Date.now() ? " — locked out" : ""
+      }`
+    );
+    // One message for every kind of failure: an unknown user, a wrong password
+    // and a wrong code are indistinguishable from the outside.
+    return response.status(401).json({ ok: false, message: ADMIN_NAMED_ACCOUNTS ? "Incorrect username, password or code." : "Incorrect password or code." });
+  }
+
+  adminFailures.delete(failureKey);
+
+  // Sign in issues a brand new token and retires whatever the browser was
+  // holding, so a session fixated before login is worth nothing.
+  const previous = parseCookies(request.headers.cookie)[SESSION_COOKIE];
+  if (previous) sessions.delete(hashSessionToken(previous));
+
+  setSessionCookie(response, request, createAdminSession(request, account.username));
+  console.log(`[auth] admin '${account.username}' signed in from ${ip}`);
+  response.json({ ok: true, username: ADMIN_NAMED_ACCOUNTS ? account.username : undefined });
 });
 
-app.post("/api/admin/logout", (request, response) => {
-  const cookies = parseCookies(request.headers.cookie);
-  if (cookies[SESSION_COOKIE]) sessions.delete(cookies[SESSION_COOKIE]);
-  clearSessionCookie(response);
-  console.log(`[auth] admin logout from ${request.ip}`);
+app.post("/api/admin/logout", requireAdminNetwork, requireCsrf, (request, response) => {
+  const token = parseCookies(request.headers.cookie)[SESSION_COOKIE];
+  const session = token ? sessions.get(hashSessionToken(token)) : null;
+  if (token) sessions.delete(hashSessionToken(token));
+  clearSessionCookie(response, request);
+  console.log(`[auth] admin '${session?.username ?? "?"}' signed out from ${normalizeIp(request.ip)}`);
   response.json({ ok: true });
 });
 
-app.get("/api/admin/session", (request, response) => {
-  response.json({ authenticated: isAuthed(request) });
+// Whether a second factor is configured is not a secret — the login form has to
+// know whether to ask for a code.
+app.get("/api/admin/session", requireAdminNetwork, (request, response) => {
+  const session = readAdminSession(request);
+  response.json({
+    authenticated: Boolean(session),
+    username: session && ADMIN_NAMED_ACCOUNTS ? session.username : undefined,
+    namedAccounts: ADMIN_NAMED_ACCOUNTS,
+    twoFactorRequired: ADMIN_TOTP_IN_USE,
+  });
 });
 
 // Gate the admin page itself: an unauthenticated visitor never sees the
@@ -432,13 +867,18 @@ app.get("/api/admin/session", (request, response) => {
 // for anyone with an old link.
 function serveAdmin(request, response) {
   if (isAuthed(request)) {
+    // The console is never a cached artefact and never framed.
+    response.set("Cache-Control", "no-store");
     return response.sendFile(path.join(__dirname, "public", "admin.html"));
   }
+  const twoFactor = ADMIN_TOTP_IN_USE;
+  response.set("Cache-Control", "no-store");
   response.send(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
     <title>PicsArt Shop — Admin Login</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -447,28 +887,54 @@ function serveAdmin(request, response) {
       <form id="loginForm" style="width:100%; max-width:340px; padding:26px; border:1px solid var(--line); border-radius:12px; background:var(--panel); box-shadow:var(--shadow);">
         <h2 style="margin:0 0 4px;">Admin login</h2>
         <p style="margin:0 0 16px; color:var(--muted); font-size:0.88rem;">Staff access only.</p>
-        <input id="password" type="password" placeholder="Password" autofocus
+        ${
+          ADMIN_NAMED_ACCOUNTS
+            ? `<input id="username" type="text" placeholder="Username" autocomplete="username" autocapitalize="none" autofocus
+          style="width:100%; padding:10px 12px; margin-bottom:12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font-size:0.95rem;" />`
+            : ""
+        }
+        <input id="password" type="password" placeholder="Password" autocomplete="current-password"${ADMIN_NAMED_ACCOUNTS ? "" : " autofocus"}
           style="width:100%; padding:10px 12px; margin-bottom:12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font-size:0.95rem;" />
+        ${
+          twoFactor
+            ? `<input id="code" type="text" placeholder="6-digit code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+          style="width:100%; padding:10px 12px; margin-bottom:12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font-size:0.95rem; letter-spacing:0.2em;" />`
+            : ""
+        }
         <p id="loginError" style="display:none; margin:0 0 12px; color:var(--danger); font-size:0.85rem;"></p>
         <button type="submit" class="command-button" style="width:100%; justify-content:center;">Log in</button>
       </form>
     </div>
     <script nonce="${response.locals.cspNonce}">
+      function readCookie(name) {
+        const prefix = name + "=";
+        const match = document.cookie.split("; ").find((entry) => entry.startsWith(prefix));
+        return match ? decodeURIComponent(match.slice(prefix.length)) : "";
+      }
       document.getElementById("loginForm").addEventListener("submit", async (event) => {
         event.preventDefault();
         const password = document.getElementById("password").value;
+        const usernameField = document.getElementById("username");
+        const codeField = document.getElementById("code");
         const errorBox = document.getElementById("loginError");
         try {
           const response = await fetch("/api/admin/login", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ password }),
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", "X-CSRF-Token": readCookie("${CSRF_COOKIE}") },
+            body: JSON.stringify({
+              username: usernameField ? usernameField.value.trim() : undefined,
+              password,
+              code: codeField ? codeField.value.trim() : undefined,
+            }),
           });
-          if (!response.ok) throw new Error("bad password");
-          window.location.reload();
-        } catch {
-          errorBox.textContent = "Incorrect password.";
+          if (response.ok) return window.location.reload();
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.message || "Sign in failed.");
+        } catch (error) {
+          errorBox.textContent = error.message || "Sign in failed.";
           errorBox.style.display = "block";
+          if (codeField) codeField.value = "";
         }
       });
     </script>
@@ -476,8 +942,8 @@ function serveAdmin(request, response) {
 </html>`);
 }
 
-app.get("/admin", serveAdmin);
-app.get("/admin.html", serveAdmin);
+app.get("/admin", requireAdminNetwork, serveAdmin);
+app.get("/admin.html", requireAdminNetwork, serveAdmin);
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -826,7 +1292,7 @@ function findUserByEmail(email) {
   return db
     .prepare(
       `SELECT id, email, name, password_hash, created_at, last_login_at, email_verified_at,
-              totp_secret, totp_enabled_at, recovery_codes
+              totp_secret, totp_enabled_at, recovery_codes, google_sub
        FROM users WHERE email = ?`
     )
     .get(email);
@@ -862,6 +1328,26 @@ app.post("/api/auth/lookup", requireCsrf, async (request, response) => {
     response.status(500).json({ error: "lookup_failed", message: error.message });
   }
 });
+
+// Send a code the customer cannot continue without, and report whether they can
+// actually be told to go and read it.
+//
+// sendMail resolves three ways: delivered, logged (development, no SMTP —
+// perfectly fine, the code is in the server log), or a real delivery failure.
+// Only the last one is a problem, and it used to be invisible: the caller
+// ignored the result and answered "check your email" regardless, leaving the
+// customer waiting on a message that was never sent.
+async function deliverCode({ to, subject, text }) {
+  const result = await sendMail({ to, subject, text });
+  if (result.delivered || result.logged) return true;
+  console.error(`[auth] could not deliver "${subject}" to ${to} — answering with an error`);
+  return false;
+}
+
+const EMAIL_FAILED = {
+  error: "email_failed",
+  message: "We couldn't send that email just now. Please try again in a moment.",
+};
 
 // ---------------------------------------------------------------------------
 // Step 2a — create an account. No session is issued here: the account is inert
@@ -907,7 +1393,12 @@ app.post("/api/auth/register", requireCsrf, async (request, response) => {
 
     const code = await issueCode(userId, "verify");
     const message = verificationEmail(code);
-    await sendMail({ to: normalizedEmail, ...message });
+    if (!(await deliverCode({ to: normalizedEmail, ...message }))) {
+      // The row stays behind unverified, which is exactly the abandoned-signup
+      // case handled above — registering again reissues a code rather than
+      // reporting the address as taken.
+      return response.status(502).json(EMAIL_FAILED);
+    }
 
     console.log(`[auth] verification code issued for ${normalizedEmail}`);
     response.status(201).json({ verificationRequired: true, email: normalizedEmail });
@@ -963,7 +1454,9 @@ app.post("/api/auth/resend-code", requireCsrf, async (request, response) => {
     if (user && (purpose === "reset" || !user.email_verified_at)) {
       const code = await issueCode(user.id, purpose);
       const message = purpose === "reset" ? passwordResetEmail(code) : verificationEmail(code);
-      await sendMail({ to: email, ...message });
+      if (!(await deliverCode({ to: email, ...message }))) {
+        return response.status(502).json(EMAIL_FAILED);
+      }
     }
     response.json({ ok: true });
   } catch (error) {
@@ -991,9 +1484,20 @@ app.post("/api/auth/login", requireCsrf, async (request, response) => {
 
   try {
     const user = await findUserByEmail(normalizedEmail);
-    const ok = user
+    // Always spend the same work on a password, so the response time says
+    // nothing about whether the account exists or how it was created.
+    const ok = user?.password_hash
       ? await verifyPassword(String(password ?? ""), user.password_hash)
       : await verifyPassword(String(password ?? ""), DUMMY_PASSWORD_HASH);
+
+    // Created through Google and never given a password: there is nothing here
+    // to check, so say so rather than rejecting a password they never set.
+    if (user && !user.password_hash) {
+      return response.status(409).json({
+        error: "use_google",
+        message: "This account signs in with Google. Use the Continue with Google button.",
+      });
+    }
 
     // One message for both failures: never reveal whether a password was close.
     if (!user || !ok) {
@@ -1003,7 +1507,11 @@ app.post("/api/auth/login", requireCsrf, async (request, response) => {
 
     if (!user.email_verified_at) {
       const code = await issueCode(user.id, "verify");
-      await sendMail({ to: normalizedEmail, ...verificationEmail(code) });
+      // Safe to report a mail failure here: the password already checked out,
+      // so this says nothing to anyone who isn't the account holder.
+      if (!(await deliverCode({ to: normalizedEmail, ...verificationEmail(code) }))) {
+        return response.status(502).json(EMAIL_FAILED);
+      }
       return response.status(403).json({
         error: "verification_required",
         message: "Confirm your email address to finish setting up your account. We've sent you a new code.",
@@ -1117,7 +1625,9 @@ app.post("/api/auth/forgot-password", requireCsrf, async (request, response) => 
     const user = await findUserByEmail(email);
     if (user) {
       const code = await issueCode(user.id, "reset");
-      await sendMail({ to: email, ...passwordResetEmail(code) });
+      if (!(await deliverCode({ to: email, ...passwordResetEmail(code) }))) {
+        return response.status(502).json(EMAIL_FAILED);
+      }
       console.log(`[auth] password reset code issued for ${email}`);
     }
     // Always the same answer: this endpoint needs no account to exist, and
@@ -1273,6 +1783,145 @@ app.get("/api/auth/me", async (request, response) => {
 // Guarantees the caller has a CSRF cookie before it posts anything.
 app.get("/api/auth/csrf", (request, response) => {
   response.json({ csrfToken: request.csrfToken });
+});
+
+// ---------------------------------------------------------------------------
+// Sign in with Google
+//
+// An account created this way is verified the moment it exists — Google has
+// already proved the address — and has no password, so neither a verification
+// code nor a reset link is ever sent. That is what lets a deployment run
+// without a mail server at all.
+// ---------------------------------------------------------------------------
+
+// The storefront asks before drawing the button, so a deployment without Google
+// credentials simply shows the email and password form.
+app.get("/api/auth/providers", (_request, response) => {
+  response.json({ google: googleIsConfigured });
+});
+
+function findUserByGoogleId(googleId) {
+  return db
+    .prepare(
+      `SELECT id, email, name, password_hash, created_at, last_login_at, email_verified_at,
+              totp_secret, totp_enabled_at, recovery_codes, google_sub
+       FROM users WHERE google_sub = ?`
+    )
+    .get(googleId);
+}
+
+// Anything that goes wrong lands back on the storefront with a reason, rather
+// than showing a bare JSON error to somebody who just clicked a button.
+function failedSignIn(response, reason, detail) {
+  console.error(`[auth] google sign-in failed (${reason}):`, detail);
+  response.redirect(`/?auth_error=${encodeURIComponent(reason)}`);
+}
+
+app.get("/api/auth/google", (request, response) => {
+  if (!googleIsConfigured) {
+    return response.status(404).json({ error: "google_disabled", message: "Google sign-in is not configured." });
+  }
+  if (!rateLimit(`google:${request.ip}`, 20, 15 * 60 * 1000)) {
+    return response.status(429).json({ error: "rate_limited", message: "Too many attempts. Try again in a few minutes." });
+  }
+
+  const state = createState();
+  response.append(
+    "Set-Cookie",
+    serializeCookie(
+      STATE_COOKIE,
+      state,
+      cookieAttributes({
+        secure: isSecureRequest(request),
+        maxAgeSeconds: STATE_TTL_SECONDS,
+        sameSite: "Lax",
+      })
+    )
+  );
+
+  response.redirect(
+    authorizationUrl({
+      state,
+      redirectUri: callbackUrl(request),
+      // Prefills the chooser when the customer already typed an address.
+      loginHint: normalizeEmail(request.query?.email) || undefined,
+    })
+  );
+});
+
+app.get("/api/auth/google/callback", async (request, response) => {
+  // One use only, and cleared before anything else can fail and leave it behind.
+  response.append(
+    "Set-Cookie",
+    serializeCookie(STATE_COOKIE, "", cookieAttributes({ secure: isSecureRequest(request), maxAgeSeconds: 0, sameSite: "Lax" }))
+  );
+
+  if (!googleIsConfigured) return failedSignIn(response, "google_disabled", "no client credentials");
+  // The customer pressed Cancel on Google's consent screen.
+  if (request.query?.error) return failedSignIn(response, "cancelled", request.query.error);
+
+  const code = String(request.query?.code ?? "");
+  if (!code) return failedSignIn(response, "invalid_response", "no code in callback");
+  const cookies = parseCookies(request.headers.cookie);
+  if (!statesMatch(cookies[STATE_COOKIE], request.query?.state)) {
+    return failedSignIn(response, "bad_state", "state cookie did not match the callback");
+  }
+
+  try {
+    const profile = await exchangeCodeForProfile({ code, redirectUri: callbackUrl(request) });
+    const email = normalizeEmail(profile.email);
+
+    let user = await findUserByGoogleId(profile.googleId);
+
+    if (!user) {
+      // Same person, already registered with a password: link the two rather
+      // than failing on the unique email, and treat the address as verified
+      // since Google has just confirmed they hold it.
+      const byEmail = await findUserByEmail(email);
+      if (byEmail) {
+        await db
+          .prepare(
+            `UPDATE users SET google_sub = ?, email_verified_at = COALESCE(email_verified_at, ${NOW_SQL}),
+                              name = COALESCE(name, ?) WHERE id = ?`
+          )
+          .run(profile.googleId, profile.name, byEmail.id);
+        user = await findUserByGoogleId(profile.googleId);
+      } else {
+        const created = await db
+          .prepare(
+            `INSERT INTO users (email, password_hash, name, google_sub, email_verified_at)
+             VALUES (?, NULL, ?, ?, ${NOW_SQL}) RETURNING id`
+          )
+          .get(email, profile.name, profile.googleId);
+        console.log(`[auth] account created through google for ${email}`);
+        user = await findUserByGoogleId(profile.googleId);
+        if (!user) throw new Error(`account ${created.id} vanished immediately after being created`);
+      }
+    }
+
+    // Two-step verification still applies: someone who turned it on chose to
+    // need a second factor, and arriving through Google doesn't waive that.
+    if (user.totp_enabled_at) {
+      response.append(
+        "Set-Cookie",
+        serializeCookie(
+          CHALLENGE_COOKIE,
+          signAccessToken(
+            { sub: user.id, use: TOKEN_USE_CHALLENGE, purpose: "totp", remember: true },
+            AUTH_SECRET,
+            CHALLENGE_TTL_SECONDS
+          ),
+          cookieAttributes({ secure: isSecureRequest(request), maxAgeSeconds: CHALLENGE_TTL_SECONDS })
+        )
+      );
+      return response.redirect("/?auth=two_factor");
+    }
+
+    await completeLogin(request, response, user, true);
+    response.redirect("/");
+  } catch (error) {
+    failedSignIn(response, "exchange_failed", error.message);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1502,7 +2151,7 @@ app.get("/api/inventory", requireAdmin, async (request, response) => {
 });
 
 app.post("/api/admin/upload", requireAdmin, (request, response) => {
-  upload.single("image")(request, response, (error) => {
+  upload.single("image")(request, response, async (error) => {
     if (error) {
       console.error("[upload] single upload failed:", error);
       return response.status(400).json({ error: "upload_failed", message: error.message });
@@ -1510,13 +2159,22 @@ app.post("/api/admin/upload", requireAdmin, (request, response) => {
     if (!request.file) {
       return response.status(400).json({ error: "upload_failed", message: "No image file received (jpg/png/webp/gif, up to 5MB)." });
     }
-    console.log(`[upload] saved ${request.file.filename}`);
-    response.json({ url: `/uploads/${request.file.filename}` });
+
+    const result = await normalizeUpload(request.file.path);
+    console.log(describeUpload(result));
+    response.json({
+      url: `/uploads/${path.basename(result.path)}`,
+      // Reported back so the console can tell the admin their photo is too
+      // small while they still have the better original to hand.
+      undersized: Boolean(result.undersized),
+      width: result.width,
+      height: result.height,
+    });
   });
 });
 
 app.post("/api/admin/upload-multiple", requireAdmin, (request, response) => {
-  upload.array("images", 10)(request, response, (error) => {
+  upload.array("images", 10)(request, response, async (error) => {
     if (error) {
       console.error("[upload] multi upload failed:", error);
       return response.status(400).json({ error: "upload_failed", message: error.message });
@@ -1524,8 +2182,17 @@ app.post("/api/admin/upload-multiple", requireAdmin, (request, response) => {
     if (!request.files || !request.files.length) {
       return response.status(400).json({ error: "upload_failed", message: "No image files received (jpg/png/webp/gif, up to 5MB each)." });
     }
-    console.log(`[upload] saved ${request.files.length} files`);
-    response.json({ urls: request.files.map((file) => `/uploads/${file.filename}`) });
+
+    const results = [];
+    for (const file of request.files) {
+      const result = await normalizeUpload(file.path);
+      console.log(describeUpload(result));
+      results.push(result);
+    }
+    response.json({
+      urls: results.map((result) => `/uploads/${path.basename(result.path)}`),
+      undersized: results.filter((result) => result.undersized).length,
+    });
   });
 });
 
@@ -1810,22 +2477,108 @@ app.get("/api/facets", requireAdmin, async (request, response) => {
   }
 });
 
+// GREATEST is Postgres's scalar equivalent of SQLite's two-argument MAX().
+const DASHBOARD_TOTALS_SQL = `SELECT
+    COALESCE(SUM(selling_price * quantity), 0) AS inventory_value,
+    COALESCE(SUM(GREATEST(quantity - reserved_quantity, 0)), 0) AS stock_count,
+    COALESCE(SUM(CASE WHEN GREATEST(quantity - reserved_quantity, 0) <= reorder_point THEN 1 ELSE 0 END), 0) AS low_stock_count,
+    COUNT(*) AS item_count
+  FROM inventory_items
+  WHERE deleted_at IS NULL`;
+
+// The tiles are a live reading; this is what turns them into a trend.
+//
+// It has to be recorded as it happens — inventory_items keeps only added_at,
+// updated_at and deleted_at, and quantity and price are overwritten in place,
+// so yesterday's inventory value cannot be reconstructed after the fact.
+//
+// One row per day, upserted, so a day ends up holding its latest reading no
+// matter how often the process restarts.
+async function captureInventorySnapshot() {
+  try {
+    const totals = await db.prepare(DASHBOARD_TOTALS_SQL).get();
+    await db
+      .prepare(
+        `INSERT INTO inventory_snapshots (captured_on, inventory_value, stock_count, low_stock_count, item_count, captured_at)
+         VALUES ((now() AT TIME ZONE 'utc')::date, ?, ?, ?, ?, to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS'))
+         ON CONFLICT (captured_on) DO UPDATE SET
+           inventory_value = EXCLUDED.inventory_value,
+           stock_count = EXCLUDED.stock_count,
+           low_stock_count = EXCLUDED.low_stock_count,
+           item_count = EXCLUDED.item_count,
+           captured_at = EXCLUDED.captured_at`
+      )
+      .run(
+        Number(totals.inventory_value) || 0,
+        Number(totals.stock_count) || 0,
+        Number(totals.low_stock_count) || 0,
+        Number(totals.item_count) || 0
+      );
+    return totals;
+  } catch (error) {
+    // A dashboard that can't record history is still a working dashboard.
+    console.error("[dashboard] snapshot failed:", error.message);
+    return null;
+  }
+}
+
+// Once at boot, then hourly. The hourly pass matters because the row is keyed
+// by day: a server started yesterday would otherwise never write today's.
+await captureInventorySnapshot();
+setInterval(captureInventorySnapshot, 60 * 60 * 1000).unref();
+
+// The oldest snapshot at least `days` old, so the comparison is against a real
+// recorded day. Falls back to the oldest one on record while the history is
+// still shorter than the window — better an honest "vs 3 days ago" than
+// nothing at all for the first week.
+async function baselineSnapshot(days) {
+  const within = await db
+    .prepare(
+      `SELECT captured_on::text AS captured_on, inventory_value, stock_count, low_stock_count, item_count
+       FROM inventory_snapshots
+       WHERE captured_on <= ((now() AT TIME ZONE 'utc')::date - ?::int)
+       ORDER BY captured_on DESC
+       LIMIT 1`
+    )
+    .get(days);
+  if (within) return within;
+  return db
+    .prepare(
+      `SELECT captured_on::text AS captured_on, inventory_value, stock_count, low_stock_count, item_count
+       FROM inventory_snapshots
+       WHERE captured_on < (now() AT TIME ZONE 'utc')::date
+       ORDER BY captured_on ASC
+       LIMIT 1`
+    )
+    .get();
+}
+
+const TREND_WINDOW_DAYS = 7;
+
 app.get("/api/dashboard", requireAdmin, async (_request, response) => {
   try {
-    // GREATEST is Postgres's scalar equivalent of SQLite's two-argument MAX().
-    const row = await db
-      .prepare(
-        `SELECT
-          COALESCE(SUM(selling_price * quantity), 0) AS inventory_value,
-          COALESCE(SUM(GREATEST(quantity - reserved_quantity, 0)), 0) AS stock_count,
-          SUM(CASE WHEN GREATEST(quantity - reserved_quantity, 0) <= reorder_point THEN 1 ELSE 0 END) AS low_stock_count,
-          COUNT(*) AS item_count
-        FROM inventory_items
-        WHERE deleted_at IS NULL`
-      )
-      .get();
+    const row = await db.prepare(DASHBOARD_TOTALS_SQL).get();
     const searches = await db.prepare(`SELECT COUNT(*) AS count FROM search_events`).get();
-    response.json({ ...row, total_searches: searches.count });
+
+    // No earlier day on record yet — the console shows the figure with no
+    // movement rather than inventing a 0% change.
+    const baseline = await baselineSnapshot(TREND_WINDOW_DAYS);
+    const trend = baseline
+      ? {
+          since: baseline.captured_on,
+          inventory_value: Number(row.inventory_value) - Number(baseline.inventory_value),
+          stock_count: Number(row.stock_count) - Number(baseline.stock_count),
+          low_stock_count: Number(row.low_stock_count) - Number(baseline.low_stock_count),
+          item_count: Number(row.item_count) - Number(baseline.item_count),
+          // Percentages only make sense against a non-zero starting point.
+          inventory_value_pct:
+            Number(baseline.inventory_value) > 0
+              ? ((Number(row.inventory_value) - Number(baseline.inventory_value)) / Number(baseline.inventory_value)) * 100
+              : null,
+        }
+      : null;
+
+    response.json({ ...row, total_searches: searches.count, trend });
   } catch (error) {
     console.error("[dashboard] failed:", error);
     response.status(500).json({ error: "dashboard_failed", message: error.message });
@@ -1928,6 +2681,120 @@ app.get("/api/shop/products/:id", async (request, response) => {
   } catch (error) {
     console.error(`[shop] product lookup failed for ${request.params.id}:`, error);
     response.status(500).json({ error: "product_lookup_failed", message: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Recommendations — "there is a better version of this, and these also exist".
+//
+// Relatedness is scored the way the search ranker thinks about relevance:
+// category first, then brand, then overlapping tags. A candidate has to clear
+// MIN_RELATED_SCORE — which takes at least a category or a brand match — so a
+// thin catalogue recommends nothing rather than something arbitrary.
+// ---------------------------------------------------------------------------
+const MIN_RELATED_SCORE = 3;
+
+// Price is the only "better" signal this catalogue has (no ratings, no spec
+// comparison), so an upgrade is a dearer neighbour. The multiple keeps that
+// honest: a $2,000 workstation is not the upgrade path for a $40 keyboard.
+const MAX_UPGRADE_MULTIPLE = 3;
+
+function categoryLeaf(path) {
+  return path ? path.split(">").map((part) => part.trim()).at(-1).toLowerCase() : "";
+}
+
+function relatednessScore(candidate, base) {
+  let score = 0;
+
+  if (base.category && candidate.category === base.category) score += 5;
+  else if (base.category && categoryLeaf(candidate.category) === categoryLeaf(base.category)) score += 3;
+
+  if (base.brand && candidate.brand && candidate.brand.toLowerCase() === base.brand.toLowerCase()) score += 3;
+
+  const baseTags = new Set(base.tags.map((tag) => tag.toLowerCase()));
+  const sharedTags = candidate.tags.filter((tag) => baseTags.has(tag.toLowerCase())).length;
+  score += Math.min(sharedTags, 3) * 1.5;
+
+  if (candidate.condition === base.condition) score += 0.5;
+  if (candidate.availableQuantity > 0) score += 1; // what can ship today wins ties
+
+  return score;
+}
+
+app.get("/api/shop/products/:id/recommendations", async (request, response) => {
+  const limit = Math.min(Math.max(1, Math.trunc(parseNumber(request.query.limit, 4))), 12);
+  const sellableStatuses = new Set(["Available", "Low Stock", "Reserved", "Out of Stock"]);
+
+  try {
+    const baseRow = await db.prepare(`${baseSelect()} AND i.external_id = ?`).get(request.params.id);
+    if (!baseRow) {
+      return response.status(404).json({ error: "not_found", message: "Product not found." });
+    }
+    const base = toDomainItem(baseRow);
+
+    // Narrow the pool in SQL to the same top-level branch ("Computers >
+    // Laptops" pulls all of Computers, so a sibling category can still be
+    // offered), the same leaf anywhere in the tree, or the same brand. The
+    // score below decides how close each one actually is.
+    const segments = base.category ? base.category.split(">").map((part) => part.trim()) : null;
+    const branch = segments ? `${segments[0]}%` : null;
+    const leaf = segments ? `%${segments.at(-1)}` : null;
+    const rows = await db
+      .prepare(
+        `${baseSelect()} AND i.external_id <> ? AND (c.path ILIKE ? OR c.path ILIKE ? OR i.brand = ?) ORDER BY i.id`
+      )
+      .all(base.id, branch, leaf, base.brand);
+
+    const related = rows
+      .filter((row) => sellableStatuses.has(row.status))
+      .map((row) => {
+        row.tagsText = safeJsonArray(row.tags).join(" ");
+        const item = toDomainItem(row);
+        item.score = relatednessScore(item, base);
+        return item;
+      })
+      .filter((item) => item.score >= MIN_RELATED_SCORE);
+
+    // A better version has to be the same *kind* of thing: a dearer keyboard is
+    // not the upgrade path for a mouse, however close the two sit in the tree.
+    // An exact category match carries that; for an uncategorised product the
+    // brand is the only stand-in there is. Alternatives stay deliberately
+    // looser — "this also exists" is allowed to cross the aisle.
+    const sameKind = (item) =>
+      base.category
+        ? item.category === base.category
+        : Boolean(base.brand) && (item.brand || "").toLowerCase() === base.brand.toLowerCase();
+
+    // Nothing converts prices server-side, so only same-currency items are
+    // comparable; one priced differently can still be offered as an alternative.
+    const isUpgrade = (item) =>
+      base.price > 0 &&
+      sameKind(item) &&
+      item.currency === base.currency &&
+      item.price > base.price &&
+      item.price <= base.price * MAX_UPGRADE_MULTIPLE;
+
+    const upgrades = related
+      .filter(isUpgrade)
+      .sort((a, b) => b.score - a.score || a.price - b.price) // the nearest step up first
+      .slice(0, limit);
+
+    const promoted = new Set(upgrades.map((item) => item.id));
+    const alternatives = related
+      .filter((item) => !promoted.has(item.id))
+      .sort((a, b) => b.score - a.score || Math.abs(a.price - base.price) - Math.abs(b.price - base.price))
+      .slice(0, limit);
+
+    response.json({
+      upgrades: upgrades.map((item) => ({
+        ...toShopItem(item),
+        priceDelta: Math.round((item.price - base.price) * 100) / 100,
+      })),
+      alternatives: alternatives.map(toShopItem),
+    });
+  } catch (error) {
+    console.error(`[shop] recommendations failed for ${request.params.id}:`, error);
+    response.status(500).json({ error: "recommendations_failed", message: error.message });
   }
 });
 

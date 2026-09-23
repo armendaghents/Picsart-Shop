@@ -99,6 +99,14 @@ export function fetchProduct(id) {
   return request(`/api/shop/products/${encodeURIComponent(id)}`);
 }
 
+// Related products for the detail view: dearer neighbours ("better versions")
+// and comparable ones. Never blocks the product itself — the caller ignores a
+// failure here.
+export function fetchRecommendations(id, limit = 4) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return request(`/api/shop/products/${encodeURIComponent(id)}/recommendations?${params}`);
+}
+
 export function fetchSuggestions(query, limit = 6) {
   const params = new URLSearchParams({ q: query, limit: String(limit) });
   return request(`/api/shop/suggest?${params}`);
@@ -128,6 +136,12 @@ export async function restoreSession() {
   const { user } = await request("/api/auth/me");
   if (user) return user;
   return refreshSession();
+}
+
+// Which third-party sign-in options this deployment has configured. Asked once
+// when the modal opens, so the button only appears where it actually works.
+export function fetchAuthProviders() {
+  return request("/api/auth/providers");
 }
 
 // Step one of the two-step form: decide whether to ask for a password or offer

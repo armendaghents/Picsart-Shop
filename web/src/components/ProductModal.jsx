@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { fetchRecommendations } from "../api";
 import { formatMoney } from "../currency";
 import { errorMessage } from "../i18n";
+
+const NO_RECOMMENDATIONS = { upgrades: [], alternatives: [] };
 
 function availabilityClass(label) {
   return `status-pill status-${label.replace(/\s+/g, "-").toLowerCase()}`;
@@ -10,17 +13,61 @@ function conditionClass(condition) {
   return `condition-pill condition-${condition.toLowerCase()}`;
 }
 
-export default function ProductModal({ product, t, currency, onClose, onBuy }) {
+function RecommendationCard({ item, t, currency, priceDelta, onOpen }) {
+  const photo = item.images && item.images.length ? item.images[0] : null;
+  return (
+    <button type="button" className="recommendation-card" onClick={() => onOpen(item.id)}>
+      <span className="product-art recommendation-art" style={{ "--art-a": item.colors[0], "--art-b": item.colors[1] }}>
+        {photo ? <img src={photo} alt={item.name} /> : <span>{item.icon}</span>}
+      </span>
+      <span className="recommendation-name">{item.name}</span>
+      <span className="recommendation-price">
+        {formatMoney(item.price, currency, item.currency)}
+        {priceDelta > 0 && (
+          <span className="recommendation-delta">+{formatMoney(priceDelta, currency, item.currency)}</span>
+        )}
+      </span>
+      {!item.inStock && <span className="recommendation-stock">{t.unavailable}</span>}
+    </button>
+  );
+}
+
+export default function ProductModal({ product, t, currency, onClose, onBuy, onOpenProduct }) {
   const [photoIndex, setPhotoIndex] = useState(0);
   const [orderState, setOrderState] = useState("idle"); // idle | adding | added | error
   const [orderError, setOrderError] = useState("");
   const [zoomed, setZoomed] = useState(false);
   const [zoomOrigin, setZoomOrigin] = useState({ x: 50, y: 50 });
+  const [recommendations, setRecommendations] = useState(NO_RECOMMENDATIONS);
+  const modalRef = useRef(null);
 
   useEffect(() => {
     setPhotoIndex(0);
     setOrderState("idle");
     setZoomed(false);
+    // Following a recommendation swaps the product inside the open modal, so
+    // send the panel back to the top — otherwise the new product opens
+    // scrolled to wherever the previous one was being read.
+    modalRef.current?.scrollTo({ top: 0 });
+  }, [product?.id]);
+
+  // A failed lookup leaves the modal exactly as it would be with nothing to
+  // recommend: the product itself must never depend on this call.
+  useEffect(() => {
+    setRecommendations(NO_RECOMMENDATIONS);
+    if (!product?.id) return undefined;
+
+    let cancelled = false;
+    fetchRecommendations(product.id)
+      .then((data) => {
+        if (cancelled) return;
+        setRecommendations({ upgrades: data.upgrades || [], alternatives: data.alternatives || [] });
+      })
+      .catch((error) => console.error("Recommendations failed", error));
+
+    return () => {
+      cancelled = true;
+    };
   }, [product?.id]);
 
   useEffect(() => {
@@ -82,7 +129,7 @@ export default function ProductModal({ product, t, currency, onClose, onBuy }) {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="product-modal">
+      <div className="product-modal" ref={modalRef}>
         <button type="button" className="icon-button subtle product-modal-close" onClick={onClose}>
           ×
         </button>
@@ -167,6 +214,39 @@ export default function ProductModal({ product, t, currency, onClose, onBuy }) {
               <span key={tag}>{tag}</span>
             ))}
           </div>
+
+          {onOpenProduct && (
+            <>
+              {recommendations.upgrades.length > 0 && (
+                <section className="product-recommendations">
+                  <h3>{t.upgradeOptions}</h3>
+                  <div className="recommendation-row">
+                    {recommendations.upgrades.map((item) => (
+                      <RecommendationCard
+                        key={item.id}
+                        item={item}
+                        t={t}
+                        currency={currency}
+                        priceDelta={item.priceDelta}
+                        onOpen={onOpenProduct}
+                      />
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {recommendations.alternatives.length > 0 && (
+                <section className="product-recommendations">
+                  <h3>{t.youMightAlsoLike}</h3>
+                  <div className="recommendation-row">
+                    {recommendations.alternatives.map((item) => (
+                      <RecommendationCard key={item.id} item={item} t={t} currency={currency} onOpen={onOpenProduct} />
+                    ))}
+                  </div>
+                </section>
+              )}
+            </>
+          )}
         </div>
       </div>
     </div>

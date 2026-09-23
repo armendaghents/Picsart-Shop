@@ -1,4 +1,4 @@
-# Atlas Search
+# Picsart Search
 
 A search-driven inventory and storefront platform, built with a React frontend, an
 Express + PostgreSQL backend, and a hybrid full-text search engine.
@@ -24,6 +24,9 @@ Both are backed by the same PostgreSQL database and the same search engine.
   in-stock toggle.
 - Product photo galleries — browse multiple photos per product on the card and in
   the detail view.
+- Recommendations on the product detail view: **Upgrade options** (related
+  products that cost more, with the price difference shown) and **You might
+  also like** (comparable ones). Clicking one opens it in place.
 - Condition badges (New / Used) and stock-status badges, color-coded for quick
   scanning.
 - English, Russian, and Armenian language support, plus USD / AMD / RUB currency
@@ -38,7 +41,8 @@ Both are backed by the same PostgreSQL database and the same search engine.
   whole cents. Checkout turns the basket into orders and moves stock.
 
 **Admin**
-- Dashboard metrics: inventory value, stock levels, low-stock alerts, search volume.
+- Dashboard metrics: inventory value, stock levels, low-stock alerts, search
+  volume — each tile showing how it has moved over the past week.
 - Full CRUD on inventory — add, edit, and delete products directly from the results
   list.
 - Multi-photo upload per product, with the ability to choose which photo is primary.
@@ -52,6 +56,41 @@ Both are backed by the same PostgreSQL database and the same search engine.
 - Typo tolerance via Damerau-Levenshtein distance.
 - Exact identifier matching for SKU, barcode, and serial number.
 - Weighted relevance scoring, with sorting by price, stock, or recency.
+
+### How recommendations are picked
+
+`GET /api/shop/products/:id/recommendations` scores every other sellable product
+against the one being viewed — exact category match counts most, then brand,
+then overlapping tags, with a nudge towards what is in stock. Anything that
+doesn't clear at least a category or brand match is left out, so a sparse
+catalogue shows nothing rather than something arbitrary.
+
+The results are then split in two:
+
+- **Upgrade options** — related products that cost *more*, nearest step up
+  first. Two rules keep the shelf honest: an upgrade must sit in the *same
+  category* (a dearer keyboard is not a better mouse, however close the two sit
+  in the tree), and it is capped at three times the current price, so a
+  workstation is never suggested as the upgrade for a keyboard. Price is the
+  only "better" signal the catalogue carries; there are no ratings or spec
+  comparisons to rank on.
+- **You might also like** — everything else related, closest in price first.
+
+Products need a category (or brand) and a non-zero price to take part. Items
+priced in another currency can only ever appear as alternatives, since nothing
+converts prices server-side.
+
+A catalogue where every product sits in its own one-word category shows empty
+shelves — correctly, since nothing in it is related to anything else. To see the
+feature working without reorganising real inventory, add the demo catalogue:
+
+```bash
+npm run db:demo              # 15 related products across three brands
+npm run db:demo -- --remove  # take them away again
+```
+
+These use `ITM-DEMO-*` ids and are inserted alongside whatever is already there,
+so removing them can never touch real stock.
 
 ## Requirements
 
@@ -86,7 +125,10 @@ AUTH_SECRET=a-long-random-string
 (`postgres://user:password@host:5432/atlas?sslmode=require`). If it is left
 unset, the app connects to `postgres://localhost:5432/atlas`. If
 `ADMIN_PASSWORD` is left unset, the app falls back to a default password and
-prints a warning on startup. Set a real one before deploying.
+prints a warning on startup — which is fine locally, but the server refuses to
+start that way once `NODE_ENV=production`. See
+[Locking down the admin console](#1a-locking-down-the-admin-console) for what to
+set instead before you deploy.
 
 `AUTH_SECRET` signs customer access tokens. Leave it unset and a random key is
 generated at each startup, which signs every customer out when the server
@@ -111,6 +153,11 @@ the catalog is empty. To drop everything and start over:
 ```bash
 npm run db:reset
 ```
+
+`npm run db:demo` adds a small set of related demo products (laptops, monitors,
+and accessories with real categories, brands, and prices) on top of whatever is
+already in the catalogue — useful for trying out search and recommendations.
+`npm run db:demo -- --remove` takes them out again.
 
 ### Coming from the old SQLite build
 
@@ -150,7 +197,8 @@ dev` serves.
 /api/admin/login` / `/api/admin/logout`.
 
 **Storefront** (public, customer-safe fields only): `GET /api/shop/products`, `GET
-/api/shop/products/:id`, `GET /api/shop/suggest` (search autocomplete), `GET
+/api/shop/products/:id`, `GET /api/shop/products/:id/recommendations` (related
+products), `GET /api/shop/suggest` (search autocomplete), `GET
 /api/shop/facets`.
 
 **Customer accounts**: `POST /api/auth/lookup` (does this address have an
@@ -218,12 +266,268 @@ token happened to expire. Each account carries a `sessions_valid_from` stamp;
 any access token minted before it is rejected, which is what makes "sign out
 everywhere" and "change password" take effect at once.
 
+### Product photos
+
+Uploads are normalised as they arrive (`lib/images.js`): rotated per EXIF,
+capped at **1600px** on the longest edge, re-encoded to WebP at quality 85, and
+stripped of metadata. A 2.4MB camera original becomes roughly 64KB without any
+visible difference at the sizes the storefront actually draws.
+
+Two deliberate limits:
+
+- **Photos are never enlarged.** Upscaling a small original would bake the blur
+  into the stored file and hide how small it really was.
+- **The re-encode is kept only if it helped.** An already-optimised photo can
+  come out of a WebP pass larger than it went in, in which case the original
+  is left alone.
+
+A product tile is about 300 CSS px, which needs **600 real pixels** on a 2x
+display. Anything below that is stretched and looks soft however it is encoded —
+so an upload under 600px is logged with a warning and reported back to the admin
+console as `undersized`, while the admin still has the better original to hand.
+Aim for 1000px or more on the longest edge.
+
+Nothing here can make an already-small photo sharp; detail that was never
+captured cannot be restored. Animated GIFs are passed through untouched, and a
+file sharp cannot read is stored exactly as it arrived rather than failing the
+upload.
+
+### Sign in with Google
+
+Optional, and off unless `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are both
+set — the storefront asks `GET /api/auth/providers` and only draws the button
+where it will work.
+
+Create an OAuth client (type: *Web application*) in the
+[Google Cloud console](https://console.cloud.google.com/apis/credentials) and
+register the callback as an **Authorised redirect URI**, matched exactly:
+
+```
+http://localhost:3000/api/auth/google/callback
+```
+
+In production use your real origin and set `PUBLIC_URL` to it, so the redirect
+URI is built from that rather than from a proxied request host.
+
+It is the redirect-based authorization code flow: no Google script runs in the
+page, so the Content-Security-Policy is untouched and no third-party code is
+ever positioned to read the session cookies. `state` is held in a short-lived
+`SameSite=Lax` cookie and must come back unchanged — Lax rather than Strict
+because a Strict cookie is deliberately withheld on the cross-site navigation
+back from Google, which would break every sign-in.
+
+An account created this way is **verified on creation** — Google has already
+proved the address — and has **no password**, so it never needs a verification
+code or a reset email. Signing in with Google using an address that already has
+a password links the two rather than failing, and two-step verification still
+applies if the customer turned it on. An account that has only ever used Google
+is told to use the button rather than being asked for a password it never set.
+
+Because this removes both flows that require outbound mail, a deployment that
+offers Google sign-in can run with no mail server at all.
+
 ### Email
 
 Verification codes, reset codes, and security notices are sent through SMTP when
 `SMTP_HOST` is configured. When it isn't — the normal case in development — the
 message is printed to the server log instead, so every flow can be walked
 end to end without a mail account. Nothing else changes between the two modes.
+
+That fallback is development-only. The app refuses to start when
+`NODE_ENV=production` and `SMTP_HOST` is unset, because printing verification
+and reset codes into a production log would let anyone with log access take over
+any account. If the process exits at boot with a `FATAL: SMTP_HOST is not set`
+message, that is this check — configure SMTP rather than working around it.
+
+## Deploying to production
+
+### 1. Environment
+
+Set these as secrets on the host, not in a file in the repo:
+
+| Variable | Notes |
+| --- | --- |
+| `NODE_ENV` | `production`. Enables the mail guard above. |
+| `DATABASE_URL` | Managed Postgres. Append `?sslmode=require`. |
+| `AUTH_SECRET` | 32+ random bytes. **If unset, a new key is generated at every startup, signing out every customer on each restart or deploy.** |
+| `ADMIN_USERS` | Comma-separated admin usernames. Set this when more than one person signs in — see below. |
+| `ADMIN_<NAME>_PASSWORD_HASH` | Per-admin scrypt hash, one per name in `ADMIN_USERS`. |
+| `ADMIN_<NAME>_TOTP_SECRET` | Per-admin authenticator secret. Strongly recommended. |
+| `ADMIN_PASSWORD_HASH` | Single shared login, used only when `ADMIN_USERS` is empty. The server will not start in production without this or a real `ADMIN_PASSWORD`. |
+| `ADMIN_TOTP_SECRET` | Authenticator secret for the shared login. |
+| `ADMIN_IP_ALLOWLIST` | Addresses or IPv4 CIDR ranges allowed to reach `/admin`. Optional, and the single biggest win if you can use it. |
+| `TRUST_PROXY` | Number of proxies in front of the app. **Required behind nginx/Cloudflare**, or the rate limits and the allowlist see the proxy's address instead of the client's. |
+| `SMTP_HOST` | e.g. `smtp.resend.com` |
+| `SMTP_PORT` | `587` |
+| `SMTP_USER` / `SMTP_PASSWORD` | Provider credentials. |
+| `MAIL_FROM` | Must use a domain verified with the provider (below). |
+
+Generate a secret with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+### 1a. Locking down the admin console
+
+The console can rewrite the catalogue and read every order, so it is guarded
+more tightly than a customer account. Generate its two secrets:
+
+```bash
+npm run admin:credentials
+```
+
+That asks for a password (never echoed) and prints an `ADMIN_PASSWORD_HASH`
+plus an `ADMIN_TOTP_SECRET` with a QR code to scan into Google Authenticator,
+1Password or Authy. Put both in the environment and drop `ADMIN_PASSWORD`
+entirely — with the hash set, the clear password exists nowhere on the server,
+so a leaked `.env` or a stray backup does not hand over the console.
+
+With `ADMIN_TOTP_SECRET` set, login asks for a six-digit code as well as the
+password. This is the layer that matters most: it means a guessed, phished or
+reused password is not enough on its own.
+
+#### More than one admin
+
+Two people sharing one password works, but it costs you four things: the
+authenticator secret has to be copied to both phones, offboarding one person
+means rotating everything and re-enrolling the other, the log cannot say which
+of you did what, and — if you sit behind the same office IP — one person's
+typos lock the other out.
+
+Give each admin their own login instead. No database involved: run the
+generator once per person,
+
+```bash
+node scripts/admin-credentials.mjs --user anna
+node scripts/admin-credentials.mjs --user bob
+```
+
+and put the result in the environment:
+
+```
+ADMIN_USERS=anna,bob
+ADMIN_ANNA_PASSWORD_HASH=scrypt$16384$8$1$...
+ADMIN_ANNA_TOTP_SECRET=...
+ADMIN_BOB_PASSWORD_HASH=scrypt$16384$8$1$...
+ADMIN_BOB_TOTP_SECRET=...
+```
+
+The login form then asks for a username, the console header shows who is signed
+in, and every admin request is logged with the account behind it:
+
+```
+[auth] admin 'anna' signed in from 10.8.0.4
+PUT /api/inventory/ITM-2041 200 14ms [admin anna]
+```
+
+Offboarding is deleting that person's three lines and restarting. Nobody else
+re-enrols, and no secret is shared.
+
+The failure lockout is scoped to the account *and* the address, so anna
+fat-fingering her password five times locks only anna-from-that-address —
+not bob sitting next to her, and not anna from anywhere else. The same scoping
+means an outsider guessing `anna` from the internet cannot lock her out of the
+office.
+
+Setting `ADMIN_USERS` turns off the shared `ADMIN_PASSWORD_HASH` login
+entirely; the two modes are exclusive. Leave it empty and everything behaves
+exactly as it did with one password.
+
+If your staff reach the console from a fixed place — an office, a VPN — add it:
+
+```
+ADMIN_IP_ALLOWLIST=203.0.113.4,10.8.0.0/24
+```
+
+Everything else gets a 404 before authentication runs at all, which takes
+remote password guessing off the table rather than merely slowing it down.
+
+What is already on without any configuration:
+
+| | |
+| --- | --- |
+| Password storage | scrypt, never compared in clear |
+| Online guessing | 20 attempts per account, 40 per address and 60 process-wide per 15 min, then a lockout that doubles from 1 minute up to an hour |
+| Timing | Both factors are always checked, so a near miss and a wild guess take the same time |
+| Session cookie | HttpOnly, SameSite=Strict, Secure off localhost, and gone when the browser closes |
+| Session storage | Only a SHA-256 of the token is kept server-side, alongside the account that owns it |
+| Stolen cookies | Each session is pinned to the network (IPv4 /24, IPv6 /64, loopback as one) and the user agent that created it; a mismatch destroys the session rather than just refusing the request. Set `ADMIN_PIN_SESSION_NETWORK=off` to pin on the user agent alone |
+| Session lifetime | 30 minutes idle, 8 hours absolute |
+| CSRF | Double-submit token plus an origin check on every admin write |
+| Fixation | Signing in always mints a new session and retires the old one |
+
+**If you lock yourself out**, the login returns `429` with the seconds
+remaining — and while it is counting down, *even the correct password is
+refused*. Either wait it out, or restart the server: the lockout counters live
+in memory, so a restart clears them (it also signs out any open admin session).
+
+Behind a proxy, set `TRUST_PROXY` to the number of hops. Without it every
+request looks like it came from the proxy, which makes the per-address limits
+and the allowlist both useless and spoofable through `X-Forwarded-For`.
+
+### 2. Email domain
+
+This is what decides whether codes reach inboxes rather than spam folders. Any
+SMTP provider works — the app speaks plain SMTP, so switching later is an
+environment change, not a code change.
+
+- Verify a sending domain with the provider, ideally a subdomain such as
+  `mail.example.com`, so transactional mail keeps its own reputation separate
+  from anything else sent from the root domain.
+- Add the **SPF** and **DKIM** records the provider issues. Without DKIM, Gmail
+  and Outlook will junk the mail.
+- Add a **DMARC** record, starting at `p=none` and tightening to `p=reject` once
+  its reports look clean.
+- Point `MAIL_FROM` at that verified domain, and set a real monitored
+  `Reply-To` rather than leaving `no-reply@` as the only contact.
+
+Sending from an unverified domain is rejected or spam-filed, which silently
+breaks signup — registration depends on the code arriving.
+
+### 3. Database
+
+`db/init.js` creates the schema and is safe to run against an existing database.
+To migrate rows from an old SQLite build, see *Coming from the old SQLite build*
+above.
+
+### 4. Verify before opening signups
+
+- Register a real account end to end and confirm the code arrives **in the
+  inbox, not spam**. Test Gmail and Outlook separately — they score differently.
+- Walk through password reset the same way.
+- Confirm `/admin` rejects a wrong password.
+- Restart the app and confirm you are still signed in — proves `AUTH_SECRET` is
+  set and stable.
+- `npm test` runs the full suite against a throwaway `atlas_test` database.
+
+### 5. After launch
+
+- Wire up the provider's **bounce and complaint webhooks**. Repeatedly mailing
+  dead addresses degrades sender reputation for everyone, including the reset
+  codes real users depend on.
+- Alert on `502 email_failed` responses and on `[mail] failed to send` in the
+  logs. Those mean customers are being blocked at signup or password reset.
+
+### How the dashboard trends work
+
+The three tiles are live aggregates over `inventory_items`, recomputed on every
+load. The movement underneath them comes from `inventory_snapshots`, one row per
+day, written when the server starts and hourly after that (the row is keyed by
+UTC date and upserted, so a day holds its most recent reading however many times
+the process restarts).
+
+This has to be recorded as it happens. `inventory_items` keeps only `added_at`,
+`updated_at` and `deleted_at`, and quantity and price are overwritten in place —
+so what stock was worth last Tuesday is not recoverable after the fact. **Trends
+therefore start from the first day the server runs this code**, not from the
+history of the catalogue.
+
+Until there is an earlier day on record, `GET /api/dashboard` returns
+`trend: null` and the tiles show no movement at all, rather than a 0% change
+that would read as "flat" when it means "unknown". The comparison is against the
+most recent snapshot at least seven days old, falling back to the oldest one on
+record while the history is still shorter than that.
 
 ## Project structure
 
@@ -233,10 +537,14 @@ lib/search.js              Search/ranking/typo-tolerance logic
 db/schema.sql                PostgreSQL schema
 db/client.js                  Connection pool + statement helpers
 db/init.js                    Database setup, migrations, demo data seeding
+db/seed-demo.js                Optional related-products demo catalogue
 db/import-sqlite.js            One-time importer for the old SQLite database
 lib/auth.js                Password hashing, access/refresh tokens, CSRF helpers
 lib/totp.js                  Two-step verification, recovery codes, one-time codes
 lib/mailer.js                 Outbound email (SMTP, or the log in development)
+lib/oauth.js                  Sign in with Google (OAuth 2.0 code flow)
+lib/images.js                 Normalises uploaded product photos
+scripts/admin-credentials.mjs  Generates the admin password hash + authenticator secret
 web/                        React source (Vite, builds both apps)
   index.html                  Storefront entry
   admin.html                   Admin entry

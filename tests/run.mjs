@@ -18,6 +18,8 @@ import pg from "pg";
 
 import { makeClient } from "./helpers.mjs";
 import authSuite from "./auth.test.mjs";
+import adminAccountsSuite from "./admin-accounts.test.mjs";
+import dashboardTrendSuite from "./dashboard-trend.test.mjs";
 import shopSuite from "./shop.test.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -91,6 +93,11 @@ async function main() {
     // Deliberately no SMTP_HOST: the server logs each message instead of
     // sending it, which is how the tests read verification codes.
     SMTP_HOST: "",
+    // Enough to switch the Google routes on. Every assertion stops before the
+    // token exchange, so no request ever leaves the machine and the suite stays
+    // runnable offline.
+    GOOGLE_CLIENT_ID: "test-client.apps.googleusercontent.com",
+    GOOGLE_CLIENT_SECRET: "test-client-secret",
   };
 
   const log = createWriteStream(LOG_PATH);
@@ -104,8 +111,11 @@ async function main() {
     const client = makeClient(BASE, LOG_PATH);
 
     const results = [];
-    for (const suite of [shopSuite, authSuite]) {
-      results.push(await suite(client, { adminPassword: ADMIN_PASSWORD }));
+    for (const suite of [shopSuite, authSuite, dashboardTrendSuite, adminAccountsSuite]) {
+      // The named-account suite boots a second server of its own: the shared
+      // single login the rest of the suite uses is a different configuration,
+      // not something one process can be in both of at once.
+      results.push(await suite(client, { adminPassword: ADMIN_PASSWORD, port: PORT + 1, databaseUrl: DATABASE_URL }));
     }
 
     console.log("\n" + "─".repeat(60));

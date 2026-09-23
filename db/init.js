@@ -229,7 +229,7 @@ export async function indexItemInFts(db, item) {
   );
 }
 
-async function insertItem(db, item) {
+export async function insertItem(db, item) {
   const categoryId = await ensureCategory(db, categoryPath(item.category));
   const warehouseId = await ensureWarehouse(db, item.warehouse);
   const locationId = await ensureLocation(db, warehouseId, item.location);
@@ -318,10 +318,18 @@ async function runMigrations(db) {
     ["totp_enabled_at", "TEXT"],
     ["recovery_codes", "TEXT"],
     ["sessions_valid_from", "BIGINT"],
+    ["google_sub", "TEXT UNIQUE"],
   ]) {
     if (!userColumns.includes(column)) {
       await db.exec(`ALTER TABLE users ADD COLUMN ${column} ${definition}`);
     }
+  }
+
+  // An account created through Google sign-in has no password, so the column
+  // can no longer be NOT NULL on databases created before that shipped.
+  const passwordColumn = (await tableColumns(db, "users")).find((column) => column.column_name === "password_hash");
+  if (passwordColumn && passwordColumn.is_nullable === "NO") {
+    await db.exec("ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL");
   }
   // Anyone who registered before email verification existed stays signed in:
   // they are treated as already verified rather than locked out.
@@ -363,6 +371,7 @@ async function runMigrations(db) {
 // at: cart_items/orders/refresh_tokens/auth_codes all reference users, and
 // cart_items also references inventory_items.
 const DROP_ALL = `
+  DROP TABLE IF EXISTS inventory_snapshots;
   DROP TABLE IF EXISTS inventory_fts;
   DROP TABLE IF EXISTS cart_items;
   DROP TABLE IF EXISTS orders;

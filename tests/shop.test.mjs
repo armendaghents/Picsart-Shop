@@ -2,6 +2,7 @@
 // basket, checkout, and the CSRF/session protections around them.
 
 import { makeJar, makeRecorder } from "./helpers.mjs";
+import sharp from "sharp";
 
 export default async function run(client, { adminPassword }) {
   const { call } = client;
@@ -11,8 +12,50 @@ export default async function run(client, { adminPassword }) {
   await call(admin, "GET", "/api/auth/csrf");
   await call(admin, "POST", "/api/admin/login", { password: adminPassword });
 
+  t.section("admin access control");
+  let r;
+  const outsider = makeJar();
+  await call(outsider, "GET", "/api/auth/csrf");
+
+  r = await call(outsider, "GET", "/api/inventory");
+  t.check("the inventory API is closed without a session", r.status === 401, `${r.status}`);
+
+  // An empty header still counts as supplied, so the jar leaves it alone.
+  r = await call(outsider, "POST", "/api/admin/login", { password: adminPassword }, { "x-csrf-token": "" });
+  t.check("logging in without a CSRF token is refused", r.status === 403, `${r.status}`);
+
+  r = await call(outsider, "POST", "/api/admin/login", { password: `${adminPassword}-wrong` });
+  t.check("a wrong password is refused", r.status === 401, `${r.status}`);
+  t.check("...without saying which factor was wrong", /password or code/i.test(r.data.message || ""), r.data.message);
+
+  const login = await call(outsider, "POST", "/api/admin/login", { password: adminPassword }, { "user-agent": "same-browser/1.0" });
+  const sessionCookie = login.setCookies.find((cookie) => cookie.startsWith("atlas_session="));
+  t.check("the session cookie is HttpOnly", /HttpOnly/i.test(sessionCookie || ""), sessionCookie);
+  t.check("...and SameSite=Strict", /SameSite=Strict/i.test(sessionCookie || ""), sessionCookie);
+  t.check("...and expires with the browser", !/Max-Age/i.test(sessionCookie || ""), sessionCookie);
+
+  r = await call(outsider, "POST", "/api/inventory", { externalId: "ITM-TEST-CSRF" }, { "x-csrf-token": "", "user-agent": "same-browser/1.0" });
+  t.check("an admin write without a CSRF token is refused", r.status === 403, `${r.status}`);
+
+  // `localhost` resolves to both 127.0.0.1 and ::1, and a browser uses either
+  // from one connection to the next. Pinning a session to the exact address
+  // therefore drops it halfway through loading the console — so the pin is to
+  // the surrounding network, and loopback counts as one network.
+  const ipv6Base = client.base.replace("127.0.0.1", "[::1]");
+  r = await fetch(`${ipv6Base}/api/dashboard`, {
+    headers: { cookie: outsider.header(), "user-agent": "same-browser/1.0" },
+  });
+  t.check("a session survives the same browser switching to IPv6 loopback", r.status === 200, `${r.status}`);
+
+  // A stolen cookie replayed from another browser fails the pin — and the
+  // session is destroyed rather than merely refused this once.
+  r = await call(outsider, "GET", "/api/inventory", undefined, { "user-agent": "some-other-browser/1.0" });
+  t.check("the session cookie is useless from another browser", r.status === 401, `${r.status}`);
+  r = await call(outsider, "GET", "/api/inventory");
+  t.check("...and replaying it kills the session outright", r.status === 401, `${r.status}`);
+
   t.section("admin inventory");
-  let r = await call(admin, "GET", "/api/facets");
+  r = await call(admin, "GET", "/api/facets");
   t.check("facets load", r.status === 200 && Array.isArray(r.data.categories), JSON.stringify(r.data).slice(0, 120));
   r = await call(admin, "GET", "/api/dashboard");
   t.check("dashboard totals are numbers", typeof r.data.item_count === "number" && typeof r.data.inventory_value === "number", JSON.stringify(r.data));
@@ -103,6 +146,45 @@ export default async function run(client, { adminPassword }) {
   r = await call(shopper, "GET", "/api/shop/orders");
   t.check("the order appears in the customer's history", (r.data.orders || []).length === 1, JSON.stringify(r.data).slice(0, 160));
 
+  t.section("recommendations");
+  const recoFixtures = [
+    { externalId: "ITM-RECO-BASE", sku: "RECO-BASE", name: "Reco Laptop", brand: "Aurora", category: "Recos > Laptops", price: 100, quantity: 5, tags: ["laptop"] },
+    { externalId: "ITM-RECO-UP", sku: "RECO-UP", name: "Reco Laptop Pro", brand: "Aurora", category: "Recos > Laptops", price: 150, quantity: 5, tags: ["laptop"] },
+    { externalId: "ITM-RECO-DOWN", sku: "RECO-DOWN", name: "Reco Laptop Mini", brand: "Aurora", category: "Recos > Laptops", price: 60, quantity: 5, tags: ["laptop"] },
+    { externalId: "ITM-RECO-FAR", sku: "RECO-FAR", name: "Reco Workstation", brand: "Aurora", category: "Recos > Laptops", price: 9000, quantity: 5, tags: ["laptop"] },
+    { externalId: "ITM-RECO-OTHER", sku: "RECO-OTHER", name: "Reco Garden Hose", category: "Outdoors > Garden", price: 150, quantity: 5 },
+    { externalId: "ITM-RECO-SIBLING", sku: "RECO-SIBLING", name: "Reco Laptop Sleeve", brand: "Aurora", category: "Recos > Accessories", price: 130, quantity: 5 },
+  ];
+  for (const fixture of recoFixtures) {
+    await call(admin, "DELETE", `/api/inventory/${fixture.externalId}`);
+    await call(admin, "POST", "/api/inventory", fixture);
+  }
+
+  r = await call(anon, "GET", "/api/shop/products/ITM-RECO-BASE/recommendations");
+  const upgradeIds = (r.data.upgrades || []).map((item) => item.id);
+  const alternativeIds = (r.data.alternatives || []).map((item) => item.id);
+  t.check("recommendations are public", r.status === 200, JSON.stringify(r.data).slice(0, 120));
+  t.check("a dearer sibling is offered as an upgrade", upgradeIds.includes("ITM-RECO-UP"), upgradeIds.join(","));
+  t.check("the upgrade carries the price difference", r.data.upgrades?.[0]?.priceDelta === 50, JSON.stringify(r.data.upgrades?.[0]?.priceDelta));
+  t.check("a cheaper sibling is never an upgrade", !upgradeIds.includes("ITM-RECO-DOWN"), upgradeIds.join(","));
+  t.check("a wildly dearer item is not an upgrade path", !upgradeIds.includes("ITM-RECO-FAR"), upgradeIds.join(","));
+  // A dearer accessory from the same brand is related, but it is not a better
+  // version of a laptop — only the same category can be that.
+  t.check("a dearer item of another kind is not an upgrade", !upgradeIds.includes("ITM-RECO-SIBLING"), upgradeIds.join(","));
+  t.check("...but it is still offered as an alternative", alternativeIds.includes("ITM-RECO-SIBLING"), alternativeIds.join(","));
+  t.check("a cheaper sibling is offered as an alternative", alternativeIds.includes("ITM-RECO-DOWN"), alternativeIds.join(","));
+  t.check("an unrelated category is not recommended",
+    ![...upgradeIds, ...alternativeIds].includes("ITM-RECO-OTHER"), [...upgradeIds, ...alternativeIds].join(","));
+  t.check("nothing appears in both lists", !upgradeIds.some((id) => alternativeIds.includes(id)));
+  t.check("cost price never leaks into a recommendation",
+    [...(r.data.upgrades || []), ...(r.data.alternatives || [])].every((item) => item.cost === undefined && item.warehouse === undefined));
+  r = await call(anon, "GET", "/api/shop/products/ITM-RECO-BASE/recommendations?limit=1");
+  t.check("the limit is honoured", (r.data.upgrades || []).length <= 1 && (r.data.alternatives || []).length <= 1, JSON.stringify(r.data).slice(0, 120));
+  r = await call(anon, "GET", "/api/shop/products/ITM-NOT-A-REAL-ID/recommendations");
+  t.check("recommendations for a missing product are 404", r.status === 404, `${r.status}`);
+
+  for (const fixture of recoFixtures) await call(admin, "DELETE", `/api/inventory/${fixture.externalId}`);
+
   t.section("concurrency");
   await call(admin, "POST", "/api/inventory", { externalId: "ITM-TEST-RACE", sku: "TEST-RACE", name: "Race Widget", category: "Testing > Fixtures", price: 1, quantity: 5, status: "Available" });
   await call(shopper, "POST", "/api/shop/cart", { itemId: "ITM-TEST-RACE", quantity: 5 });
@@ -112,6 +194,37 @@ export default async function run(client, { adminPassword }) {
   t.check("simultaneous checkouts can't double-spend stock", succeeded === 1, `${succeeded} succeeded`);
   const raced = (await call(shopper, "GET", "/api/shop/products/ITM-TEST-RACE")).data;
   t.check("stock is exactly zero, never negative", raced.availableQuantity === 0, `${raced.availableQuantity}`);
+
+  t.section("uploaded photos are normalised");
+  // A photo larger than any tile needs, and one far smaller than the smallest.
+  const bigPng = await sharp({
+    create: { width: 2000, height: 1500, channels: 3, background: { r: 200, g: 60, b: 90 } },
+  })
+    .png()
+    .toBuffer();
+  const smallPng = await sharp({
+    create: { width: 200, height: 200, channels: 3, background: { r: 30, g: 120, b: 200 } },
+  })
+    .png()
+    .toBuffer();
+
+  let up = await client.upload(admin, "/api/admin/upload", "image", [["big.png", bigPng]]);
+  t.check("an oversized photo uploads", up.status === 200 && Boolean(up.data.url), JSON.stringify(up.data));
+  t.check("...and is stored as WebP", (up.data.url || "").endsWith(".webp"), up.data.url);
+  let stored = sharp(Buffer.from(await (await fetch(client.base + up.data.url)).arrayBuffer()));
+  let meta = await stored.metadata();
+  t.check("...capped at 1600px on its longest edge", Math.max(meta.width, meta.height) === 1600, `${meta.width}x${meta.height}`);
+  t.check("...keeping its aspect ratio", Math.abs(meta.width / meta.height - 2000 / 1500) < 0.01, `${meta.width}x${meta.height}`);
+  t.check("...and is not reported as undersized", up.data.undersized === false, JSON.stringify(up.data));
+  await call(admin, "DELETE", "/api/admin/upload", { url: up.data.url });
+
+  up = await client.upload(admin, "/api/admin/upload", "image", [["small.png", smallPng]]);
+  stored = sharp(Buffer.from(await (await fetch(client.base + up.data.url)).arrayBuffer()));
+  meta = await stored.metadata();
+  // Enlarging here would bake the blur in and hide how small the original was.
+  t.check("a small photo is never enlarged", meta.width === 200 && meta.height === 200, `${meta.width}x${meta.height}`);
+  t.check("...and is reported as too small to look sharp", up.data.undersized === true, JSON.stringify(up.data));
+  await call(admin, "DELETE", "/api/admin/upload", { url: up.data.url });
 
   for (const fixture of [...fixtures, { externalId: "ITM-TEST-RACE" }]) {
     await call(admin, "DELETE", `/api/inventory/${fixture.externalId}`);
