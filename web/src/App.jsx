@@ -21,10 +21,11 @@ import {
   checkout,
   restoreSession,
   logout,
+  fetchRates,
 } from "./api";
 import { useDebouncedValue } from "./hooks/useDebouncedValue";
 import { useScrolled } from "./hooks/useScrolled";
-import { EXCHANGE_RATES } from "./currency";
+import { availableCurrencies, getRates, setRates } from "./currency";
 
 function readStored(key, fallback) {
   return localStorage.getItem(key) || fallback;
@@ -36,6 +37,10 @@ const PAGE_SIZE = 20;
 export default function App() {
   const [lang, setLang] = useState(() => readStored("atlas_lang", "en"));
   const [currency, setCurrency] = useState(() => readStored("atlas_currency", "USD"));
+  // Bumped when the server's rates arrive. The rates themselves live in
+  // currency.js so every formatMoney call site keeps its signature; this is
+  // what tells React that the numbers on screen have changed.
+  const [ratesVersion, setRatesVersion] = useState(0);
   const [dark, setDark] = useState(false);
   // Compacts as soon as the page moves, and expands again only back at the very
   // top — the gap is what stops the header oscillating. See useScrolled.
@@ -136,6 +141,22 @@ export default function App() {
   }, [currency]);
 
   useEffect(() => {
+    fetchRates()
+      .then((data) => {
+        setRates(data.rates, data.updatedAt);
+        setRatesVersion((value) => value + 1);
+      })
+      // Leaving the storefront on USD is the honest failure: prices are in USD,
+      // so nothing shown is wrong — there is just no conversion on offer.
+      .catch((error) => console.error("Rate load failed", error));
+  }, []);
+
+  // A currency stored from a previous visit may no longer be offered.
+  useEffect(() => {
+    if (ratesVersion && !availableCurrencies().includes(currency)) setCurrency("USD");
+  }, [ratesVersion, currency]);
+
+  useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
 
@@ -161,12 +182,13 @@ export default function App() {
     fetchFacets()
       .then((data) => {
         setCategories(data.categories || []);
-        // Always start at 0 (not the cheapest item's price). Upper bound is a
-        // round 2,000,000 AMD (converted to the internal USD unit prices are
-        // stored in), growing automatically if the catalog ever exceeds it.
+        // Always start at 0 (not the cheapest item's price). The upper bound is
+        // a round USD figure, growing automatically if the catalogue exceeds
+        // it. It used to be derived from a hardcoded AMD rate, which tied the
+        // slider to a number nobody could correct — and the bound belongs to
+        // the catalogue, not to whichever currency happens to be on screen.
         const floor = 0;
-        const amdCeilingInUsd = Math.ceil(2000000 / EXCHANGE_RATES.AMD / 100) * 100;
-        const ceiling = Math.max(amdCeilingInUsd, Math.ceil((data.maxPrice || 0) / 100) * 100);
+        const ceiling = Math.max(5000, Math.ceil((data.maxPrice || 0) / 100) * 100);
         setPriceBounds({ min: floor, max: ceiling });
         setPriceValue({ min: floor, max: ceiling });
       })
@@ -286,8 +308,8 @@ export default function App() {
     }
   }
 
-  async function handleCheckout() {
-    const result = await checkout();
+  async function handleCheckout(delivery) {
+    const result = await checkout(delivery);
     setCart(await fetchCart());
     // Stock moved, so the grid behind the basket is now out of date.
     setCatalogVersion((value) => value + 1);
@@ -312,6 +334,7 @@ export default function App() {
           lang={lang}
           onLangChange={setLang}
           currency={currency}
+          currencies={availableCurrencies()}
           onCurrencyChange={setCurrency}
           dark={dark}
           onToggleDark={() => setDark((value) => !value)}

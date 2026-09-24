@@ -4,6 +4,7 @@
 
 import { makeJar, makeRecorder } from "./helpers.mjs";
 import { totpCodeAt } from "../lib/totp.js";
+import { shouldRetryAfterRefresh } from "../web/src/api.js";
 
 export default async function run(client) {
   const { call, latestCodeFor, logContains, raw } = client;
@@ -83,6 +84,32 @@ export default async function run(client) {
   t.check("resetting signs out every previous device", r.status === 401, `got ${r.status}`);
   r = await call(jarReset, "POST", "/api/auth/reset-password", { email, code: resetCode, password: "AnotherPass1234" });
   t.check("a spent reset code cannot be reused", r.status === 400);
+
+  t.section("an expired access token must not break account management");
+  // The access token lasts 15 minutes; an account panel left open outlives it.
+  // Dropping only the access cookie is exactly that state: the session is still
+  // valid, it just needs rotating.
+  const aged = makeJar();
+  await call(aged, "GET", "/api/auth/csrf");
+  // The password as it stands after the reset section above.
+  await call(aged, "POST", "/api/auth/login", { email, password: "ResetPassword123" });
+  aged.drop("atlas_access");
+  r = await call(aged, "POST", "/api/auth/totp/setup");
+  t.check("...the server refuses it, as it must", r.status === 401, `${r.status}`);
+  r = await call(aged, "POST", "/api/auth/refresh");
+  t.check("...but the refresh token still rotates the session", r.status === 200, `${r.status}`);
+  r = await call(aged, "POST", "/api/auth/totp/setup");
+  t.check("...and the action then succeeds", r.status === 200, `${r.status}`);
+
+  // Which is what the storefront client does automatically — for everything
+  // except the endpoints where a 401 is an answer about credentials rather
+  // than an aged-out session.
+  for (const path of ["/api/auth/totp/setup", "/api/auth/totp/enable", "/api/auth/profile", "/api/auth/sessions", "/api/shop/cart"]) {
+    t.check(`the client retries ${path} after refreshing`, shouldRetryAfterRefresh(path), path);
+  }
+  for (const path of ["/api/auth/login", "/api/auth/refresh", "/api/auth/two-factor", "/api/auth/reset-password"]) {
+    t.check(`the client does not retry ${path}`, !shouldRetryAfterRefresh(path), path);
+  }
 
   t.section("two-step verification");
   r = await call(jarReset, "POST", "/api/auth/totp/setup");

@@ -125,17 +125,42 @@ export default function AnalyticsPanel() {
                   {dayOrders.map((order) => (
                     <li key={order.id} className="order-list-item">
                       <div className="order-list-main">
-                        <strong>{order.name}</strong>
-                        <span>{[order.brand, order.model].filter(Boolean).join(" · ") || "—"}</span>
+                        <strong>{order.orderNumber}</strong>
+                        <span>{order.buyerEmail || "—"}</span>
                       </div>
-                      <div className="order-list-meta">
-                        <span>{order.sku}</span>
-                        {order.category && (
-                          <span>{order.category.split(">").map((part) => part.trim()).at(-1)}</span>
+                      {/* One entry per product line, under the order that
+                          holds them — the shape the old flat table could not
+                          express, so this list used to show loose lines with
+                          no way to tell which were bought together. */}
+                      <ul className="order-line-list">
+                        {order.lines.map((line) => (
+                          <li key={line.id}>
+                            <span>
+                              {line.quantity > 1 && `${line.quantity} × `}
+                              {line.name || line.sku || "—"}
+                            </span>
+                            <span>{formatMoney(line.price * line.quantity)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                      {/* Staff cannot pack a parcel without this. */}
+                      <div className="order-ship-to">
+                        {order.delivery.method === "pickup" ? (
+                          <span>Pickup — {order.delivery.name} · {order.delivery.phone}</span>
+                        ) : (
+                          <span>
+                            {[order.delivery.name, order.delivery.phone, order.delivery.line1, order.delivery.line2, order.delivery.city, order.delivery.postalCode, order.delivery.country]
+                              .filter(Boolean)
+                              .join(" · ") || "No delivery details"}
+                          </span>
                         )}
-                        {order.quantity > 1 && <span>×{order.quantity}</span>}
-                        <span>{formatMoney(order.price)}</span>
-                        <span>{formatTime(order.orderedAt)}</span>
+                        {order.delivery.notes && <em>{order.delivery.notes}</em>}
+                      </div>
+
+                      <div className="order-list-meta">
+                        <span className={`order-status order-status-${order.status}`}>{order.status}</span>
+                        <span>{formatMoney(order.total)}</span>
+                        <span>{formatTime(order.placedAt)}</span>
                       </div>
                     </li>
                   ))}

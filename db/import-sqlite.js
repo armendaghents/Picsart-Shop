@@ -14,13 +14,22 @@ import { fileURLToPath } from "node:url";
 
 import Database from "better-sqlite3";
 
-import { openDatabase, describeConnection } from "./init.js";
+import { openDatabase, describeConnection, rebuildOrdersFromFlatRows } from "./init.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_SQLITE_PATH = path.join(__dirname, "..", "data", "atlas.db");
 
 // Child tables last on the way in, first on the way out.
-const TABLES = ["categories", "warehouses", "locations", "inventory_items", "orders", "search_events"];
+//
+// `orders` is not copied column-for-column like the rest: the SQLite file holds
+// the old flat shape, where each row was one product line and no parent order
+// existed. It is reassembled separately by importOrders() below.
+const TABLES = ["categories", "warehouses", "locations", "inventory_items", "search_events"];
+
+// Emptied alongside them, and listed here because nothing copies into them by
+// name. order_items is dropped by the CASCADE on orders anyway; naming it keeps
+// the truncate honest about what it clears.
+const ORDER_TABLES = ["order_items", "orders"];
 
 async function targetColumns(db, table) {
   const rows = await db
@@ -90,6 +99,34 @@ async function resyncSequence(db, table) {
   );
 }
 
+// The old file's orders table is the flat shape: one row per product line,
+// grouped into an actual order only by a shared buyer and timestamp. Hand the
+// rows to the same reassembly the in-place migration uses so an imported
+// history and a migrated one come out identical.
+async function importOrders(db, sqlite) {
+  const exists = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'orders'")
+    .get();
+  if (!exists) {
+    console.log("  orders: not present in the SQLite file, skipped");
+    return;
+  }
+
+  // An older file may predate any of these columns; ask for only what it has
+  // and let the reassembly treat the rest as absent.
+  const available = new Set(sourceColumns(sqlite, "orders"));
+  const wanted = ["inventory_item_id", "sku", "name", "brand", "model", "category", "quantity", "price", "user_id", "ordered_at"];
+  const columns = wanted.filter((column) => available.has(column));
+  const rows = sqlite.prepare(`SELECT ${columns.join(", ")} FROM orders`).all();
+  if (!rows.length) {
+    console.log("  orders: 0 rows");
+    return;
+  }
+
+  const { orderCount, lineCount } = await rebuildOrdersFromFlatRows(db, rows);
+  console.log(`  orders: ${lineCount} line(s) rebuilt into ${orderCount} order(s)`);
+}
+
 async function rebuildSearchIndex(db) {
   await db.pool.query(`
     INSERT INTO inventory_fts (item_id, name, brand, model, sku, barcode, serial_number, tags, ocr_text, description, category_path)
@@ -138,11 +175,12 @@ async function main() {
     for (const table of TABLES) targetColumnsCache[table] = await targetColumns(db, table);
 
     await db.pool.query(
-      `TRUNCATE ${["inventory_fts", ...TABLES].join(", ")} RESTART IDENTITY CASCADE`
+      `TRUNCATE ${["inventory_fts", ...ORDER_TABLES, ...TABLES].join(", ")} RESTART IDENTITY CASCADE`
     );
 
     for (const table of TABLES) await copyTable(db, sqlite, table);
     for (const table of TABLES) await resyncSequence(db, table);
+    await importOrders(db, sqlite);
     await rebuildSearchIndex(db);
 
     console.log("\nImport complete.");

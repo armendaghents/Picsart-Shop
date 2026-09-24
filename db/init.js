@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { newOrderNumber, ORDER_STATUS_PENDING, toMinor } from "../lib/orders.js";
 import { createDatabase, DATABASE_URL } from "./client.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -274,6 +275,137 @@ async function tableColumns(db, table) {
     .all(table);
 }
 
+// ---------------------------------------------------------------------------
+// Orders: flat rows -> parent order + lines
+//
+// This one cannot be done with ALTER TABLE, because the old shape held no
+// parent row to alter: each product line WAS an order row. So the old table is
+// parked as orders_v1, schema.sql builds the two new tables beside it, and the
+// rows are then reassembled into the orders they were always meant to be.
+//
+// Split into a before-schema and an after-schema half for that reason: the
+// rename has to happen before CREATE TABLE IF NOT EXISTS sees an `orders`
+// table and decides there is nothing to do.
+// ---------------------------------------------------------------------------
+
+// The old shape is recognisable by inventory_item_id sitting on `orders`
+// itself; in the new one that column lives on order_items.
+async function ordersNeedSplitting(db) {
+  const columns = await tableColumns(db, "orders");
+  return columns.length > 0 && columns.some((column) => column.column_name === "inventory_item_id");
+}
+
+export async function parkLegacyOrders(db) {
+  if (!(await ordersNeedSplitting(db))) return false;
+
+  if ((await tableColumns(db, "orders_v1")).length) {
+    throw new Error(
+      "Both `orders` (old shape) and `orders_v1` exist. A previous migration was interrupted.\n" +
+        "Inspect both tables and drop or rename one before starting again — refusing to guess which holds the real order history."
+    );
+  }
+
+  // Renaming a table leaves its indexes and constraints under their original
+  // names, so the new `orders` would collide with them on creation. Postgres
+  // would silently pick orders_pkey1; naming them properly keeps the parked
+  // table readable for whoever inspects it later.
+  await db.exec(`
+    ALTER TABLE orders RENAME TO orders_v1;
+    ALTER INDEX IF EXISTS orders_pkey RENAME TO orders_v1_pkey;
+    ALTER INDEX IF EXISTS idx_orders_ordered_at RENAME TO idx_orders_v1_ordered_at;
+  `);
+  console.log("[migrate] parked the old flat orders table as orders_v1");
+  return true;
+}
+
+async function backfillOrdersFromLegacy(db) {
+  if (!(await tableColumns(db, "orders_v1")).length) return;
+
+  // Only ever runs into an empty table. If real orders have been taken since
+  // the split, a second pass would duplicate the entire history.
+  const { count } = await db.prepare("SELECT COUNT(*) AS count FROM orders").get();
+  if (Number(count) > 0) return;
+
+  const legacy = await db
+    .prepare(
+      `SELECT id, inventory_item_id, sku, name, brand, model, category, quantity, price, user_id, ordered_at
+       FROM orders_v1 ORDER BY ordered_at, id`
+    )
+    .all();
+  if (!legacy.length) return;
+
+  const { orderCount } = await rebuildOrdersFromFlatRows(db, legacy);
+  console.log(
+    `[migrate] rebuilt ${legacy.length} order line(s) into ${orderCount} order(s). ` +
+      "orders_v1 is kept as a backup — drop it once the history looks right: DROP TABLE orders_v1;"
+  );
+}
+
+// Turns flat one-line-per-row order records into parent orders plus lines.
+// Shared by the in-place migration above and by the SQLite importer, which
+// reads the same flat shape out of the old file — one definition of how an old
+// row becomes a new order, so the two paths cannot disagree about it.
+//
+// Rows must carry: inventory_item_id, sku, name, brand, model, category,
+// quantity, price, user_id, ordered_at.
+export async function rebuildOrdersFromFlatRows(db, rows) {
+  // Lines written by one checkout share a buyer and an exact timestamp — the
+  // only thing the old shape left to group on, and precisely the guesswork the
+  // parent row exists to end. A NULL user_id (orders from before accounts) is
+  // its own group, which is why the key spells NULL out rather than comparing.
+  const groups = new Map();
+  for (const row of rows) {
+    const key = `${row.user_id === null || row.user_id === undefined ? "anon" : row.user_id}@${row.ordered_at}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  await db.transaction(async (tx) => {
+    for (const lines of groups.values()) {
+      const first = lines[0];
+      const totalMinor = lines.reduce((sum, line) => sum + toMinor(line.price) * line.quantity, 0);
+
+      // 'pending' is the honest status for every one of these: they were placed
+      // when checkout took no money, so none of them has been paid for.
+      const { id: orderId } = await tx
+        .prepare(
+          `INSERT INTO orders (order_number, user_id, status, total_minor, currency, placed_at, updated_at)
+           VALUES (?,?,?,?,?,?,?) RETURNING id`
+        )
+        .get(
+          newOrderNumber(),
+          first.user_id ?? null,
+          ORDER_STATUS_PENDING,
+          totalMinor,
+          "USD",
+          first.ordered_at,
+          first.ordered_at
+        );
+
+      for (const line of lines) {
+        await tx
+          .prepare(
+            `INSERT INTO order_items (order_id, inventory_item_id, sku, name, brand, model, category, quantity, unit_price_minor)
+             VALUES (?,?,?,?,?,?,?,?,?)`
+          )
+          .run(
+            orderId,
+            line.inventory_item_id,
+            line.sku ?? null,
+            line.name ?? null,
+            line.brand ?? null,
+            line.model ?? null,
+            line.category ?? null,
+            line.quantity,
+            toMinor(line.price)
+          );
+      }
+    }
+  });
+
+  return { orderCount: groups.size, lineCount: rows.length };
+}
+
 // CREATE TABLE IF NOT EXISTS doesn't add new columns to an already-existing
 // table, so anyone whose database predates these columns needs them added by
 // hand here.
@@ -348,22 +480,40 @@ async function runMigrations(db) {
     await db.exec("ALTER TABLE refresh_tokens ADD COLUMN last_used_at TEXT");
   }
 
-  // Orders placed before customer accounts existed have no buyer.
-  const orderColumns = await tableColumns(db, "orders");
-  if (!orderColumns.some((column) => column.column_name === "user_id")) {
-    await db.exec("ALTER TABLE orders ADD COLUMN user_id INTEGER REFERENCES users(id)");
-  }
-  if (!orderColumns.some((column) => column.column_name === "category")) {
-    await db.exec("ALTER TABLE orders ADD COLUMN category TEXT");
-  }
-
-  // An order snapshots the item's name and SKU, both of which are optional.
-  for (const column of ["name", "sku"]) {
-    const existing = orderColumns.find((entry) => entry.column_name === column);
-    if (existing && existing.is_nullable === "NO") {
-      await db.exec(`ALTER TABLE orders ALTER COLUMN ${column} DROP NOT NULL`);
+  // The rates the storefront used to carry as a hardcoded constant. Seeded once
+  // so an existing shop keeps showing the same figures it showed yesterday;
+  // from then on they are whatever an admin has set.
+  const { count: rateCount } = await db.prepare("SELECT COUNT(*) AS count FROM exchange_rates").get();
+  if (Number(rateCount) === 0) {
+    for (const [code, rate] of [["USD", 1], ["AMD", 390], ["RUB", 90]]) {
+      await db.prepare("INSERT INTO exchange_rates (code, rate, updated_by) VALUES (?,?,?)").run(code, rate, "seed");
     }
   }
+
+  // Delivery details, added after orders shipped. A database created between
+  // the orders split and this change has the new tables but none of these.
+  const ordersColumns = (await tableColumns(db, "orders")).map((column) => column.column_name);
+  for (const [column, definition] of [
+    ["delivery_method", "TEXT NOT NULL DEFAULT 'delivery' CHECK (delivery_method IN ('delivery', 'pickup'))"],
+    ["ship_name", "TEXT"],
+    ["ship_phone", "TEXT"],
+    ["ship_country", "TEXT"],
+    ["ship_city", "TEXT"],
+    ["ship_line1", "TEXT"],
+    ["ship_line2", "TEXT"],
+    ["ship_postal_code", "TEXT"],
+    ["ship_notes", "TEXT"],
+  ]) {
+    if (ordersColumns.length && !ordersColumns.includes(column)) {
+      await db.exec(`ALTER TABLE orders ADD COLUMN ${column} ${definition}`);
+    }
+  }
+
+  // The old per-column patches to `orders` (adding user_id, adding category,
+  // relaxing name/sku) are gone: they applied to the flat shape, which
+  // parkLegacyOrders now renames away before this runs. The new orders and
+  // order_items tables carry those columns from birth.
+  await backfillOrdersFromLegacy(db);
 }
 
 // Dropped in dependency order so the foreign keys don't block the reset.
@@ -371,10 +521,13 @@ async function runMigrations(db) {
 // at: cart_items/orders/refresh_tokens/auth_codes all reference users, and
 // cart_items also references inventory_items.
 const DROP_ALL = `
+  DROP TABLE IF EXISTS exchange_rates;
   DROP TABLE IF EXISTS inventory_snapshots;
   DROP TABLE IF EXISTS inventory_fts;
   DROP TABLE IF EXISTS cart_items;
+  DROP TABLE IF EXISTS order_items;
   DROP TABLE IF EXISTS orders;
+  DROP TABLE IF EXISTS orders_v1;
   DROP TABLE IF EXISTS refresh_tokens;
   DROP TABLE IF EXISTS auth_codes;
   DROP TABLE IF EXISTS search_events;
@@ -400,6 +553,10 @@ export async function openDatabase({ reset = false, seed = true } = {}) {
 
   if (reset) await db.exec(DROP_ALL);
 
+  // Before the schema, not after: CREATE TABLE IF NOT EXISTS would look at the
+  // old flat `orders` table, conclude one already exists, and leave it alone.
+  await parkLegacyOrders(db);
+
   const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
   await db.exec(schema);
   await runMigrations(db);
@@ -418,9 +575,14 @@ export async function openDatabase({ reset = false, seed = true } = {}) {
 // Allow `node db/init.js --reset` to rebuild the database from scratch.
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
   const reset = process.argv.includes("--reset");
+  // Same rule the server follows: the demo catalogue is development scaffolding
+  // and must not appear in a real shop. This is the other door into seeding —
+  // an operator running `node db/init.js` against production to create the
+  // schema would otherwise publish invented products along with it.
+  const seed = process.env.NODE_ENV !== "production";
   try {
-    const db = await openDatabase({ reset });
-    console.log(reset ? "Database reset and reseeded." : "Database is ready.");
+    const db = await openDatabase({ reset, seed });
+    console.log(reset ? (seed ? "Database reset and reseeded." : "Database reset.") : "Database is ready.");
     await db.close();
   } catch (error) {
     console.error(error.message);

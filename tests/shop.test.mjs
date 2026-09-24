@@ -131,20 +131,253 @@ export default async function run(client, { adminPassword }) {
   t.check("a line can be removed", !r.data.lines.some((line) => line.itemId === "ITM-TEST-B"));
 
   t.section("checkout");
+  const address = {
+    method: "delivery",
+    name: "Ani Grigoryan",
+    phone: "+374 91 234567",
+    country: "Armenia",
+    city: "Yerevan",
+    line1: "12 Abovyan Street",
+    line2: "Flat 4",
+    postalCode: "0001",
+  };
   const before = (await call(shopper, "GET", "/api/shop/products/ITM-TEST-A")).data;
   const basket = (await call(shopper, "GET", "/api/shop/cart")).data;
-  r = await call(shopper, "POST", "/api/shop/cart/checkout");
+
+  // Nothing can be shipped without somewhere to ship it, so this must fail
+  // before any stock moves.
+  const stockBeforeBadAddress = before.availableQuantity;
+  r = await call(shopper, "POST", "/api/shop/cart/checkout", { delivery: { name: "", phone: "" } });
+  t.check("checkout without delivery details is refused", r.status === 400 && r.data.error === "delivery_invalid", JSON.stringify(r.data).slice(0, 160));
+  t.check("...naming every missing field at once",
+    ["name", "phone", "country", "city", "line1"].every((field) => (r.data.fields || []).some((problem) => problem.field === field)),
+    JSON.stringify(r.data.fields));
+  const stockAfterBadAddress = (await call(shopper, "GET", "/api/shop/products/ITM-TEST-A")).data.availableQuantity;
+  t.check("...without taking any stock", stockBeforeBadAddress === stockAfterBadAddress, `${stockBeforeBadAddress} -> ${stockAfterBadAddress}`);
+  r = await call(shopper, "POST", "/api/shop/cart/checkout", { delivery: { ...address, phone: "abc" } });
+  t.check("an unreachable phone number is refused", r.status === 400 && (r.data.fields || []).some((problem) => problem.field === "phone"), JSON.stringify(r.data).slice(0, 160));
+
+  r = await call(shopper, "POST", "/api/shop/cart/checkout", { delivery: address });
   t.check("checkout succeeds", r.status === 201 && r.data.ok === true, JSON.stringify(r.data));
+  t.check("...and records where it goes", r.data.delivery?.city === "Yerevan" && r.data.delivery?.line1 === "12 Abovyan Street", JSON.stringify(r.data.delivery));
   t.check("the charged total matches the basket", r.data.total === basket.totals[0].subtotal, `${r.data.total} vs ${basket.totals[0].subtotal}`);
   const after = (await call(shopper, "GET", "/api/shop/products/ITM-TEST-A")).data;
   t.check("stock moved by exactly the quantity bought",
     before.availableQuantity - after.availableQuantity === basket.lines.find((line) => line.itemId === "ITM-TEST-A").quantity);
   r = await call(shopper, "GET", "/api/shop/cart");
   t.check("the basket is empty afterwards", r.data.itemCount === 0);
-  r = await call(shopper, "POST", "/api/shop/cart/checkout");
+  r = await call(shopper, "POST", "/api/shop/cart/checkout", { delivery: address });
   t.check("checking out an empty basket is rejected", r.status === 400);
   r = await call(shopper, "GET", "/api/shop/orders");
   t.check("the order appears in the customer's history", (r.data.orders || []).length === 1, JSON.stringify(r.data).slice(0, 160));
+
+  t.section("an order is one order, not one row per product");
+  const placed = r.data.orders[0];
+  t.check("it has an order number the customer can quote", /^PS-[0-9A-Z]{5}-[0-9A-Z]{5}$/.test(placed.orderNumber || ""), placed.orderNumber);
+  // No money has been taken — checkout does not charge yet — so anything other
+  // than 'pending' here would be the shop claiming it had been paid.
+  t.check("it starts unpaid", placed.status === "pending", placed.status);
+  t.check("its total is the sum of its lines",
+    placed.total === placed.lines.reduce((sum, line) => sum + line.lineTotal, 0),
+    `${placed.total} vs lines ${JSON.stringify(placed.lines.map((line) => line.lineTotal))}`);
+  t.check("the lines bought together are held under that one order", placed.lines.length >= 1 && placed.itemCount >= placed.lines.length,
+    JSON.stringify({ lines: placed.lines.length, items: placed.itemCount }));
+
+  // Their own stock: the checkout section above empties the shared fixtures,
+  // so reusing them here would fail on availability rather than on anything
+  // these checks are about.
+  for (const fixture of [
+    { externalId: "ITM-ORD-A", sku: "ORD-A", name: "Order Widget A", category: "Testing > Orders", price: 10, quantity: 50, status: "Available" },
+    { externalId: "ITM-ORD-B", sku: "ORD-B", name: "Order Widget B", category: "Testing > Orders", price: 2.5, quantity: 50, status: "Available" },
+  ]) {
+    await call(admin, "DELETE", `/api/inventory/${fixture.externalId}`);
+    await call(admin, "POST", "/api/inventory", fixture);
+  }
+
+  // The whole point of the parent row: a multi-line basket used to become N
+  // separate order rows, indistinguishable from N separate purchases.
+  await call(shopper, "POST", "/api/shop/cart", { itemId: "ITM-ORD-A", quantity: 1 });
+  await call(shopper, "POST", "/api/shop/cart", { itemId: "ITM-ORD-B", quantity: 2 });
+  r = await call(shopper, "POST", "/api/shop/cart/checkout", { delivery: address });
+  t.check("a two-product basket checks out", r.status === 201, JSON.stringify(r.data).slice(0, 160));
+  const multi = (await call(shopper, "GET", "/api/shop/orders")).data.orders[0];
+  t.check("...and becomes a single order", multi.lines.length === 2, `${multi.lines.length} lines`);
+  t.check("...holding three items", multi.itemCount === 3, `${multi.itemCount}`);
+  t.check("...with its own distinct number", multi.orderNumber !== placed.orderNumber);
+  t.check("...and a total covering both lines",
+    multi.total === multi.lines.reduce((sum, line) => sum + line.lineTotal, 0), `${multi.total}`);
+
+  t.section("the customer hears about it");
+  // Fire-and-forget, so give the send a moment to reach the log.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  let mail = client.latestEmailFor(email);
+  t.check("checkout sends a confirmation", /Thanks for your order/.test(mail), mail.slice(0, 120));
+  t.check("...with the order number in the subject", mail.includes(`Subject: Your Picsart Shop order ${multi.orderNumber}`),
+    (mail.match(/Subject:.*/) || [])[0]);
+  t.check("...itemising what was bought", /2 × Order Widget B/.test(mail), mail.slice(0, 400));
+  t.check("...with the total", mail.includes("Total:"), mail.slice(0, 400));
+  t.check("...and where it is going", mail.includes("12 Abovyan Street") && mail.includes("Yerevan"), mail.slice(0, 500));
+  // Checkout takes no money, so the receipt must not imply any was taken.
+  t.check("...saying nothing about payment", !/paid|payment received|charged/i.test(mail), mail.slice(0, 500));
+
+  t.section("a retried checkout does not buy twice");
+  const stockBefore = (await call(shopper, "GET", "/api/shop/products/ITM-ORD-A")).data.availableQuantity;
+  await call(shopper, "POST", "/api/shop/cart", { itemId: "ITM-ORD-A", quantity: 1 });
+  const key = "test-idempotency-key-0001";
+  const first = await call(shopper, "POST", "/api/shop/cart/checkout", { delivery: address }, { "idempotency-key": key });
+  t.check("the first attempt places the order", first.status === 201, JSON.stringify(first.data).slice(0, 160));
+  const retry = await call(shopper, "POST", "/api/shop/cart/checkout", { delivery: address }, { "idempotency-key": key });
+  t.check("the retry is recognised, not refused", retry.status === 200 && retry.data.replayed === true, JSON.stringify(retry.data).slice(0, 160));
+  t.check("...and returns the same order", retry.data.orderNumber === first.data.orderNumber,
+    `${retry.data.orderNumber} vs ${first.data.orderNumber}`);
+  const stockAfter = (await call(shopper, "GET", "/api/shop/products/ITM-ORD-A")).data.availableQuantity;
+  t.check("...having taken stock only once", stockBefore - stockAfter === 1, `${stockBefore} -> ${stockAfter}`);
+
+  t.section("collecting it, and not asking twice");
+  r = await call(shopper, "GET", "/api/shop/delivery/latest");
+  t.check("the last address is offered back for the next order", r.data.delivery?.line1 === "12 Abovyan Street", JSON.stringify(r.data).slice(0, 160));
+  t.check("...but not the previous order's one-off notes", r.data.delivery?.notes === null, JSON.stringify(r.data.delivery));
+  const stranger = makeJar();
+  await call(stranger, "GET", "/api/auth/csrf");
+  r = await call(stranger, "GET", "/api/shop/delivery/latest");
+  t.check("...and never to someone not signed in", r.status === 401, `${r.status}`);
+
+  // A pickup order has nowhere to ship to, so demanding an address would be
+  // asking the customer to invent one.
+  await call(shopper, "POST", "/api/shop/cart", { itemId: "ITM-ORD-B", quantity: 1 });
+  r = await call(shopper, "POST", "/api/shop/cart/checkout", {
+    delivery: { method: "pickup", name: "Ani Grigoryan", phone: "+374 91 234567" },
+  });
+  t.check("a pickup order needs no address", r.status === 201, JSON.stringify(r.data).slice(0, 160));
+  t.check("...and is recorded as a pickup", r.data.delivery?.method === "pickup", JSON.stringify(r.data.delivery));
+  r = await call(shopper, "POST", "/api/shop/cart", { itemId: "ITM-ORD-B", quantity: 1 });
+  r = await call(shopper, "POST", "/api/shop/cart/checkout", { delivery: { method: "teleport", name: "Ani", phone: "+37491234567" } });
+  t.check("an unknown delivery method is refused", r.status === 400 && (r.data.fields || []).some((problem) => problem.field === "method"), JSON.stringify(r.data).slice(0, 160));
+
+  t.section("display currencies");
+  r = await call(anon, "GET", "/api/shop/rates");
+  t.check("the storefront can read the rates without signing in", r.status === 200, `${r.status}`);
+  t.check("...and they are quoted against USD", r.data.base === "USD" && r.data.rates?.USD === 1, JSON.stringify(r.data).slice(0, 140));
+  t.check("...including the seeded ones", r.data.rates?.AMD > 0 && r.data.rates?.RUB > 0, JSON.stringify(r.data.rates));
+
+  r = await call(anon, "PUT", "/api/admin/rates/AMD", { rate: 400 });
+  t.check("a customer cannot set a rate", r.status === 401, `${r.status}`);
+  r = await call(admin, "PUT", "/api/admin/rates/AMD", { rate: 405 });
+  t.check("an admin can", r.status === 200, JSON.stringify(r.data));
+  r = await call(anon, "GET", "/api/shop/rates");
+  t.check("...and the storefront sees the new rate straight away", r.data.rates.AMD === 405, JSON.stringify(r.data.rates));
+  r = await call(admin, "GET", "/api/admin/rates");
+  t.check("...recorded against the admin who set it", r.data.rates.find((row) => row.code === "AMD")?.updated_by === "admin",
+    JSON.stringify(r.data.rates));
+
+  // USD is the unit every other rate is measured against, so letting it be
+  // anything but 1 would silently reprice the entire shop.
+  r = await call(admin, "PUT", "/api/admin/rates/USD", { rate: 2 });
+  t.check("the base currency cannot be repriced", r.status === 400, JSON.stringify(r.data).slice(0, 140));
+  r = await call(admin, "DELETE", "/api/admin/rates/USD");
+  t.check("...nor removed", r.status === 400, `${r.status}`);
+  for (const bad of [0, -5, "abc"]) {
+    r = await call(admin, "PUT", "/api/admin/rates/AMD", { rate: bad });
+    t.check(`a rate of ${JSON.stringify(bad)} is refused`, r.status === 400, `${r.status}`);
+  }
+  r = await call(admin, "PUT", "/api/admin/rates/TOOLONG", { rate: 5 });
+  t.check("a non-currency code is refused", r.status === 400, `${r.status}`);
+
+  r = await call(admin, "PUT", "/api/admin/rates/EUR", { rate: 0.92 });
+  t.check("a new currency can be added", r.status === 200, JSON.stringify(r.data));
+  r = await call(anon, "GET", "/api/shop/rates");
+  t.check("...and reaches the storefront", r.data.rates.EUR === 0.92, JSON.stringify(r.data.rates));
+  r = await call(admin, "DELETE", "/api/admin/rates/EUR");
+  t.check("...and can be removed again", r.status === 200, `${r.status}`);
+  r = await call(anon, "GET", "/api/shop/rates");
+  t.check("...leaving the storefront without it", r.data.rates.EUR === undefined, JSON.stringify(r.data.rates));
+
+  // The whole point: money is recorded in USD whatever the shopper was looking at.
+  r = await call(shopper, "GET", "/api/shop/orders");
+  t.check("orders are still recorded in the currency the shop charges in",
+    r.data.orders.every((order) => order.currency === "USD"), JSON.stringify(r.data.orders.map((o) => o.currency)));
+
+  t.section("fulfilment");
+  r = await call(admin, "GET", "/api/admin/orders");
+  t.check("staff can list orders", r.status === 200 && Array.isArray(r.data.orders), JSON.stringify(r.data).slice(0, 160));
+  t.check("...with a count per status to work from", typeof r.data.counts?.pending === "number", JSON.stringify(r.data.counts));
+  const anOrder = r.data.orders.find((order) => order.status === "pending");
+  t.check("...each carrying its lines and destination",
+    Array.isArray(anOrder?.lines) && anOrder.lines.length > 0 && Boolean(anOrder.delivery), JSON.stringify(anOrder).slice(0, 200));
+  t.check("...and the moves that are legal from where it is",
+    JSON.stringify(anOrder?.nextStatuses) === JSON.stringify(["paid", "cancelled"]), JSON.stringify(anOrder?.nextStatuses));
+
+  r = await call(outsider, "GET", "/api/admin/orders");
+  t.check("the order list is closed without an admin session", r.status === 401, `${r.status}`);
+  r = await call(shopper, "PATCH", `/api/admin/orders/${anOrder.id}/status`, { status: "shipped" });
+  t.check("a customer cannot move their own order along", r.status === 401 || r.status === 403, `${r.status}`);
+
+  // An order cannot ship before it is paid for. The console never offers the
+  // move, but the server is what has to refuse it.
+  r = await call(admin, "PATCH", `/api/admin/orders/${anOrder.id}/status`, { status: "shipped" });
+  t.check("a pending order cannot jump straight to shipped", r.status === 409 && r.data.error === "bad_transition", JSON.stringify(r.data).slice(0, 160));
+  t.check("...and says what it could do instead", JSON.stringify(r.data.allowed) === JSON.stringify(["paid", "cancelled"]), JSON.stringify(r.data.allowed));
+  r = await call(admin, "PATCH", `/api/admin/orders/${anOrder.id}/status`, { status: "nonsense" });
+  t.check("an unknown status is refused", r.status === 400, `${r.status}`);
+
+  r = await call(admin, "PATCH", `/api/admin/orders/${anOrder.id}/status`, { status: "paid" });
+  t.check("a pending order can be marked paid", r.status === 200 && r.data.status === "paid", JSON.stringify(r.data));
+  r = await call(admin, "PATCH", `/api/admin/orders/${anOrder.id}/status`, { status: "shipped" });
+  t.check("...and then shipped", r.status === 200 && r.data.status === "shipped", JSON.stringify(r.data));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  t.check("...which tells the customer it is on its way",
+    /is on its way/.test(client.latestEmailFor(email)), (client.latestEmailFor(email).match(/Subject:.*/) || [])[0]);
+  // Marking an order paid is internal bookkeeping until a provider confirms it.
+  t.check("...but being marked paid does not claim money was taken",
+    !/Subject:.*(paid|payment)/i.test(client.latestEmailFor(email)), (client.latestEmailFor(email).match(/Subject:.*/) || [])[0]);
+  r = await call(admin, "PATCH", `/api/admin/orders/${anOrder.id}/status`, { status: "shipped" });
+  t.check("marking it again changes nothing", r.status === 200 && r.data.unchanged === true, JSON.stringify(r.data));
+  r = await call(admin, "PATCH", `/api/admin/orders/${anOrder.id}/status`, { status: "cancelled" });
+  t.check("a shipped order cannot be cancelled", r.status === 409, JSON.stringify(r.data).slice(0, 160));
+
+  // Cancelling means the goods never left, so the stock checkout took has to
+  // come back — otherwise every cancellation quietly destroys inventory.
+  await call(shopper, "POST", "/api/shop/cart", { itemId: "ITM-ORD-A", quantity: 2 });
+  const stockBeforeCancel = (await call(admin, "GET", "/api/inventory/ITM-ORD-A")).data.quantity;
+  r = await call(shopper, "POST", "/api/shop/cart/checkout", { delivery: address });
+  const cancelNumber = r.data.orderNumber;
+  const stockWhileHeld = (await call(admin, "GET", "/api/inventory/ITM-ORD-A")).data.quantity;
+  t.check("checkout takes the stock", stockBeforeCancel - stockWhileHeld === 2, `${stockBeforeCancel} -> ${stockWhileHeld}`);
+  const toCancel = (await call(admin, "GET", `/api/admin/orders?q=${cancelNumber}`)).data.orders[0];
+  r = await call(admin, "PATCH", `/api/admin/orders/${toCancel.id}/status`, { status: "cancelled" });
+  t.check("the order can be cancelled", r.status === 200 && r.data.status === "cancelled", JSON.stringify(r.data));
+  const stockAfterCancel = (await call(admin, "GET", "/api/inventory/ITM-ORD-A")).data.quantity;
+  t.check("...and its stock goes back on the shelf", stockAfterCancel === stockBeforeCancel, `${stockWhileHeld} -> ${stockAfterCancel}, expected ${stockBeforeCancel}`);
+  r = await call(admin, "PATCH", `/api/admin/orders/${toCancel.id}/status`, { status: "paid" });
+  t.check("a cancelled order is final", r.status === 409, JSON.stringify(r.data).slice(0, 160));
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  mail = client.latestEmailFor(email);
+  t.check("cancelling tells the customer", mail.includes(`order ${cancelNumber} was cancelled`), (mail.match(/Subject:.*/) || [])[0]);
+
+  r = await call(admin, "GET", `/api/admin/orders?q=${cancelNumber}`);
+  t.check("an order can be found by its number", r.data.orders.length === 1 && r.data.orders[0].orderNumber === cancelNumber, JSON.stringify(r.data).slice(0, 160));
+  r = await call(admin, "GET", "/api/admin/orders?status=cancelled");
+  t.check("...and filtered by status", r.data.orders.length > 0 && r.data.orders.every((order) => order.status === "cancelled"), JSON.stringify(r.data.orders.map((o) => o.status)));
+  r = await call(admin, "GET", "/api/admin/orders?status=banana");
+  t.check("an unknown status filter is refused", r.status === 400, `${r.status}`);
+
+  t.section("the admin calendar counts orders, not product lines");
+  const today = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  const month = `${today.getFullYear()}-${pad(today.getMonth() + 1)}`;
+  const day = `${month}-${pad(today.getDate())}`;
+  const tzOffset = -today.getTimezoneOffset();
+  r = await call(admin, "GET", `/api/analytics/orders/day?date=${day}&tzOffset=${tzOffset}`);
+  const dayOrders = r.data.orders || [];
+  t.check("the day view lists orders with their lines", dayOrders.length > 0 && Array.isArray(dayOrders[0].lines),
+    JSON.stringify(r.data).slice(0, 160));
+  const twoLine = dayOrders.find((order) => order.lines.length === 2);
+  t.check("a two-line order is one entry, not two", Boolean(twoLine), `${dayOrders.length} orders today`);
+  t.check("...and names the buyer", twoLine?.buyerEmail === email, `${twoLine?.buyerEmail} vs ${email}`);
+  r = await call(admin, "GET", `/api/analytics/orders/summary?month=${month}&tzOffset=${tzOffset}`);
+  t.check("the month summary agrees with the day view", Number(r.data.days?.[day]) === dayOrders.length,
+    `${r.data.days?.[day]} vs ${dayOrders.length}`);
 
   t.section("recommendations");
   const recoFixtures = [
@@ -189,7 +422,9 @@ export default async function run(client, { adminPassword }) {
   await call(admin, "POST", "/api/inventory", { externalId: "ITM-TEST-RACE", sku: "TEST-RACE", name: "Race Widget", category: "Testing > Fixtures", price: 1, quantity: 5, status: "Available" });
   await call(shopper, "POST", "/api/shop/cart", { itemId: "ITM-TEST-RACE", quantity: 5 });
   // Ten simultaneous checkouts of a five-unit basket: one must win outright.
-  const attempts = await Promise.all(Array.from({ length: 10 }, () => call(shopper, "POST", "/api/shop/cart/checkout")));
+  const attempts = await Promise.all(
+    Array.from({ length: 10 }, () => call(shopper, "POST", "/api/shop/cart/checkout", { delivery: address }))
+  );
   const succeeded = attempts.filter((attempt) => attempt.status === 201).length;
   t.check("simultaneous checkouts can't double-spend stock", succeeded === 1, `${succeeded} succeeded`);
   const raced = (await call(shopper, "GET", "/api/shop/products/ITM-TEST-RACE")).data;

@@ -491,6 +491,137 @@ breaks signup — registration depends on the code arriving.
 To migrate rows from an old SQLite build, see *Coming from the old SQLite build*
 above.
 
+**Orders are migrated automatically on first start.** A database created
+before orders had a parent row holds the old flat shape — one row per product
+line, with no order to belong to. On startup that table is renamed to
+`orders_v1`, the new `orders` and `order_items` tables are created, and the old
+rows are reassembled into the orders they came from (lines sharing a buyer and
+an exact timestamp were one checkout). Nothing is deleted: `orders_v1` stays as
+a backup, and the log tells you the line and order counts so you can reconcile
+them. Once the history looks right:
+
+```sql
+DROP TABLE orders_v1;
+```
+
+Every migrated order gets status `pending`, because none of them was ever paid
+for — checkout does not take money yet.
+
+Migrated orders also have no delivery address, because the old checkout never
+asked for one. They are the only orders in the system that can be missing it:
+every new order must carry a destination before it is accepted.
+
+### 3a. What checkout collects
+
+Checkout requires delivery details, validated server-side in
+`normaliseDelivery()` (`lib/orders.js`) and rejected with a per-field list
+before any stock is touched:
+
+| Method | Required |
+| --- | --- |
+| `delivery` | recipient name, phone, country, city, street address |
+| `pickup` | recipient name, phone |
+
+Optional on both: second address line, postal code, and per-order delivery
+notes. The address is snapshotted onto the order, so a customer who later moves
+house does not retroactively change where last month's parcel was sent.
+
+`GET /api/shop/delivery/latest` returns the address from the customer's most
+recent order so the form arrives prefilled — the notes deliberately do not
+carry over, being instructions for one delivery rather than part of an address.
+
+### 3b. Running the orders
+
+`/admin` → **Orders** is the screen staff work from: one row per order,
+filtered by where it is in its life, searchable by order number, buyer email or
+recipient name. Opening a row shows the items and the address to send them to.
+
+An order moves `pending → paid → shipped`, and can be `cancelled` or
+`refunded`. The legal moves live in one table (`TRANSITIONS` in
+`lib/orders.js`), which both the buttons and the server read — so the console
+can only offer a move the server will accept, and an order can never ship
+before it is paid for. The payment webhook will consult the same table when it
+advances an order to `paid`.
+
+**Cancelling puts the stock back**; refunding does not. A cancelled order never
+left the building, so its units return to the shelf automatically. A refunded
+one may be damaged, kept, or still in transit — restocking something nobody has
+inspected would sell a customer a unit that does not exist, so staff put those
+back by hand from the inventory screen once they arrive.
+
+Every status change is logged with the admin who made it:
+
+```
+[orders] #41 paid -> shipped by admin anna
+```
+
+### 3c. What the customer is told
+
+| When | Message |
+| --- | --- |
+| Order placed | Receipt: order number, the items, the total, and the address it is going to |
+| Marked shipped | "…is on its way" |
+| Cancelled | Order cancelled, nothing will be sent |
+| Refunded | Refunded, money takes a few days to appear |
+
+Marking an order **paid sends nothing**. Until a payment provider confirms it,
+that transition is internal bookkeeping, and an email saying money was taken is
+a claim the shop cannot back up. For the same reason the receipt says nothing
+about payment at all — when payments land, either move that send to the `paid`
+transition or add a second message for it (`orderConfirmationEmail` in
+`lib/mailer.js` carries a note to this effect).
+
+All of these are sent **after** the database transaction commits and are
+fire-and-forget: the order is already placed, so a slow or broken SMTP host
+must never turn a successful checkout into an error the customer sees. A
+failure is logged as `[mail] failed to send` — alert on it, per *After launch*
+below.
+
+### 3d. Currencies
+
+**The shop prices and charges in USD.** AMD, RUB and anything else are a
+conversion shown for the customer's convenience — the storefront marks those
+figures as approximate and states the USD amount before checkout, so nobody
+discovers the real currency on their card statement. Orders are always recorded
+in USD.
+
+The rates live in the `exchange_rates` table and are edited at **/admin →
+Currencies**, with the admin who changed each one recorded beside it. They used
+to be a constant in the frontend bundle, which meant correcting a wrong rate
+took a code change, a rebuild and a deploy; now it takes a minute, and the
+storefront picks it up on the next page load.
+
+USD is the base: its rate is always 1, and the server refuses to change or
+remove it, because every other rate is measured against it.
+
+If the rates cannot be loaded the storefront offers USD only. That is
+deliberate — prices are in USD, so nothing shown is wrong; there is simply no
+conversion on offer until the server answers. It never falls back to a guessed
+rate.
+
+**If Picsart ever wants to bill in dram**, this is not enough on its own: the
+order would need to record the currency, the rate used and the converted total,
+checkout would have to reject a quote whose rate had moved, and the payment
+provider would need to settle in AMD. Converting for display and charging in
+another currency are different problems.
+
+**Still missing, and the reason this is not yet a shop:** none of this is
+charged for. Checkout records an order and moves stock without taking payment.
+See the payment work before opening it to customers.
+
+**The demo catalogue is skipped when `NODE_ENV=production`.** On a development
+machine an empty items table is filled with sample stock (ApexForge
+workstations, Northstar laptops) so there is something to search; a real shop
+starts empty instead, because those products do not exist and would otherwise
+go live priced and orderable. This holds for both doors into seeding — starting
+the server, and running `node db/init.js` by hand.
+
+So a first production boot shows an empty storefront. That is correct: sign in
+to `/admin` and add the real catalogue. If you see invented products, the app
+is not running with `NODE_ENV=production` — check that first, because the same
+variable is what refuses a placeholder admin password and requires a mail
+server.
+
 ### 4. Verify before opening signups
 
 - Register a real account end to end and confirm the code arrives **in the
@@ -532,35 +663,56 @@ record while the history is still shorter than that.
 ## Project structure
 
 ```
-server.js                Express app + all API routes
-lib/search.js              Search/ranking/typo-tolerance logic
-db/schema.sql                PostgreSQL schema
-db/client.js                  Connection pool + statement helpers
-db/init.js                    Database setup, migrations, demo data seeding
-db/seed-demo.js                Optional related-products demo catalogue
-db/import-sqlite.js            One-time importer for the old SQLite database
-lib/auth.js                Password hashing, access/refresh tokens, CSRF helpers
-lib/totp.js                  Two-step verification, recovery codes, one-time codes
-lib/mailer.js                 Outbound email (SMTP, or the log in development)
-lib/oauth.js                  Sign in with Google (OAuth 2.0 code flow)
-lib/images.js                 Normalises uploaded product photos
-scripts/admin-credentials.mjs  Generates the admin password hash + authenticator secret
-web/                        React source (Vite, builds both apps)
-  index.html                  Storefront entry
-  admin.html                   Admin entry
-  src/App.jsx                    Storefront: state + layout
-  src/components/                  Header, SearchBar, FilterPopover, ProductGrid,
-                                     ProductCard, ProductModal, AuthModal,
-                                     AccountPanel, CartPanel, Footer
-  src/admin/AdminApp.jsx           Admin: state + layout
-  src/admin/components/              Sidebar, Dashboard, SearchConsole,
-                                       FiltersSidebar, InventoryResults,
-                                       ItemFormModal, ConfirmDialog
-  src/i18n.js                      Translations (storefront)
-  src/currency.js                    Currency conversion
-  src/api.js / src/admin/api.js        API clients
-public/styles.css          Shared stylesheet
-public/uploads/              Uploaded product photos (created automatically)
+server.js                  Assembles the app: middleware, route mounts, listen
+
+routes/                  One file per area of the API
+  admin-auth.js            Console sign-in, and serving the console
+  admin-inventory.js       Catalogue CRUD, photo upload, facets, dashboard
+  admin-orders.js          Fulfilment: list, search, change status
+  analytics.js             Order calendar
+  auth.js                  Customer accounts, sessions, 2FA, Google sign-in
+  cart.js                  Basket, checkout, a customer's own orders
+  shop.js                  Storefront catalogue and recommendations
+
+lib/                     The machinery the routes use
+  config.js                Settings read from the environment
+  async-routes.js          Router factory that catches async errors
+  admin-session.js         Admin accounts, lockout, IP allowlist, sessions
+  customer-session.js      Customer tokens, cookies, revocation, throttling
+  csrf.js                  Double-submit check, shared by both of the above
+  auth.js                  Password hashing, tokens, cookie helpers
+  totp.js                  Two-step verification, recovery codes
+  oauth.js                 Sign in with Google
+  mailer.js                Outbound email (SMTP, or the log in development)
+  catalog.js               Reading items, ranking, search
+  search.js                Scoring and typo tolerance
+  orders.js                Order numbers, money, statuses, delivery rules
+  snapshots.js             Daily inventory readings behind the trend tiles
+  images.js                Normalises uploaded product photos
+
+db/
+  connection.js            The one open pool, shared by every module
+  schema.sql               PostgreSQL schema
+  client.js                Statement helpers over node-postgres
+  init.js                  Schema setup, migrations, demo data
+  seed-demo.js             Optional related-products demo catalogue
+  import-sqlite.js         One-time importer for the old SQLite database
+
+scripts/admin-credentials.mjs  Generates the admin password hash + 2FA secret
+
+web/                     React source (Vite, builds both apps)
+  index.html               Storefront entry
+  admin.html               Admin entry
+  src/App.jsx              Storefront: state + layout
+  src/components/          Header, SearchBar, FilterPopover, ProductGrid,
+                             ProductCard, ProductModal, AuthModal,
+                             AccountPanel, CartPanel, Footer
+  src/admin/AdminApp.jsx   Admin: state + layout
+  src/admin/components/    Sidebar, Dashboard, SearchConsole, FiltersSidebar,
+                             InventoryResults, ItemFormModal, OrdersPanel,
+                             AnalyticsPanel, ConfirmDialog
+  src/i18n.js              Translations (storefront)
+  src/currency.js          Currency conversion
 ```
 
 `public/index.html`, `public/admin.html`, and `public/assets/` are build output —

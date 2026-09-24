@@ -55,6 +55,41 @@ export function fetchOrdersForDay(date) {
   return request(`/api/analytics/orders/day?date=${encodeURIComponent(date)}&tzOffset=${localTzOffset()}`);
 }
 
+// ---------------------------------------------------------------------------
+// Fulfilment
+// ---------------------------------------------------------------------------
+export function fetchAdminOrders({ status = "all", q = "", page = 1 } = {}) {
+  const query = new URLSearchParams({ status, q, page: String(page) });
+  return request(`/api/admin/orders?${query}`);
+}
+
+export function updateOrderStatus(id, status) {
+  return request(`/api/admin/orders/${id}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Display exchange rates
+// ---------------------------------------------------------------------------
+export function fetchRates() {
+  return request("/api/admin/rates");
+}
+
+export function saveRate(code, rate) {
+  return request(`/api/admin/rates/${encodeURIComponent(code)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rate }),
+  });
+}
+
+export function deleteRate(code) {
+  return request(`/api/admin/rates/${encodeURIComponent(code)}`, { method: "DELETE" });
+}
+
 export function fetchInventory(params) {
   const query = new URLSearchParams(
     Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)]))

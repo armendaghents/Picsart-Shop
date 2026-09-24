@@ -11,6 +11,28 @@
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+// A 401 from these is an answer about credentials — "wrong password", "bad
+// code" — not a session that quietly aged out, so replaying them after a
+// refresh would be wrong (and /refresh itself would recurse).
+//
+// Everything else under /api/auth is ordinary account management behind a
+// session: turning on two-step verification, changing a name, listing devices.
+// Those must retry like any other call. Excluding the whole prefix, as this
+// once did, meant that once the 15-minute access token expired, every button
+// in the account panel failed and only failed — the page had been open longer
+// than the token lived.
+const CREDENTIAL_PATHS = new Set([
+  "/api/auth/lookup",
+  "/api/auth/register",
+  "/api/auth/verify-email",
+  "/api/auth/resend-code",
+  "/api/auth/login",
+  "/api/auth/two-factor",
+  "/api/auth/forgot-password",
+  "/api/auth/reset-password",
+  "/api/auth/refresh",
+]);
+
 function readCookie(name) {
   const prefix = `${name}=`;
   const match = document.cookie.split("; ").find((entry) => entry.startsWith(prefix));
@@ -53,6 +75,14 @@ async function refreshSession() {
   return refreshInFlight;
 }
 
+// Exported so the rule can be asserted directly. It is the kind of decision
+// that looks obvious and is easy to get subtly wrong — the previous version
+// excluded the whole /api/auth prefix and silently broke every account-panel
+// action once the access token aged out.
+export function shouldRetryAfterRefresh(path) {
+  return !CREDENTIAL_PATHS.has(path.split("?")[0]);
+}
+
 async function request(path, { method = "GET", body, allowRetry = true } = {}) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -65,7 +95,7 @@ async function request(path, { method = "GET", body, allowRetry = true } = {}) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
-  if (response.status === 401 && allowRetry && !path.startsWith("/api/auth/")) {
+  if (response.status === 401 && allowRetry && shouldRetryAfterRefresh(path)) {
     const user = await refreshSession();
     if (user) return request(path, { method, body, allowRetry: false });
   }
@@ -86,6 +116,12 @@ async function request(path, { method = "GET", body, allowRetry = true } = {}) {
 // ---------------------------------------------------------------------------
 export function fetchFacets() {
   return request("/api/shop/facets");
+}
+
+// Display conversion rates, set by an admin. Fetched once on load; until they
+// arrive the storefront offers USD only rather than guessing.
+export function fetchRates() {
+  return request("/api/shop/rates");
 }
 
 export function fetchProducts(params) {
@@ -228,6 +264,10 @@ export function clearCart() {
   return request("/api/shop/cart", { method: "DELETE" });
 }
 
-export function checkout() {
-  return request("/api/shop/cart/checkout", { method: "POST" });
+export function fetchLatestDelivery() {
+  return request("/api/shop/delivery/latest");
+}
+
+export function checkout(delivery) {
+  return request("/api/shop/cart/checkout", { method: "POST", body: { delivery } });
 }

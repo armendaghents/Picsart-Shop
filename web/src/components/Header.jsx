@@ -1,10 +1,13 @@
 import { LANGUAGES } from "../i18n";
 
+const CURRENCY_SYMBOLS = { USD: "$", AMD: "֏", RUB: "₽", EUR: "€", GBP: "£" };
+
 export default function Header({
   t,
   lang,
   onLangChange,
   currency,
+  currencies = ["USD"],
   onCurrencyChange,
   dark,
   onToggleDark,
@@ -45,9 +48,14 @@ export default function Header({
           value={currency}
           onChange={(event) => onCurrencyChange(event.target.value)}
         >
-          <option value="USD">USD $</option>
-          <option value="AMD">AMD ֏</option>
-          <option value="RUB">RUB ₽</option>
+          {/* Only what the server has a rate for. A currency with no rate
+              cannot be converted, and offering it would show prices that are
+              simply the USD number with the wrong symbol on it. */}
+          {currencies.map((code) => (
+            <option key={code} value={code}>
+              {code} {CURRENCY_SYMBOLS[code] || ""}
+            </option>
+          ))}
         </select>
 
         <select

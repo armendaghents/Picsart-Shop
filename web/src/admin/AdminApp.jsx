@@ -6,6 +6,8 @@ import Dashboard from "./components/Dashboard";
 import FiltersSidebar from "./components/FiltersSidebar";
 import InventoryResults from "./components/InventoryResults";
 import AnalyticsPanel from "./components/AnalyticsPanel";
+import OrdersPanel from "./components/OrdersPanel";
+import RatesPanel from "./components/RatesPanel";
 import ItemFormModal from "./components/ItemFormModal";
 import ConfirmDeleteDialog from "./components/ConfirmDialog";
 import Pagination from "../components/Pagination";
@@ -149,6 +151,10 @@ export default function AdminApp() {
 
         {view === "analytics" ? (
           <AnalyticsPanel />
+        ) : view === "orders" ? (
+          <OrdersPanel />
+        ) : view === "rates" ? (
+          <RatesPanel />
         ) : (
           <>
             <SearchConsole query={query} onQueryChange={setQuery} />

@@ -29,6 +29,24 @@ export default function Sidebar({ activeView, onNavigate }) {
           <span>Inventory</span>
         </button>
         <button
+          className={`nav-item${activeView === "orders" ? " active" : ""}`}
+          type="button"
+          title="Orders"
+          onClick={() => onNavigate("orders")}
+        >
+          <span>❑</span>
+          <span>Orders</span>
+        </button>
+        <button
+          className={`nav-item${activeView === "rates" ? " active" : ""}`}
+          type="button"
+          title="Currencies"
+          onClick={() => onNavigate("rates")}
+        >
+          <span>⇄</span>
+          <span>Currencies</span>
+        </button>
+        <button
           className={`nav-item${activeView === "analytics" ? " active" : ""}`}
           type="button"
           title="Analytics"

@@ -2956,3 +2956,366 @@ button.account-chip {
     transform: none;
   }
 }
+
+/* Order lines nested under their order in the admin day list, and the order
+   number on a customer's order card. Both exist because an order is now a
+   thing in its own right rather than a loose collection of product rows. */
+.order-line-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.order-line-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.order-card-number {
+  margin: 2px 0 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.order-status {
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.18);
+}
+
+.order-status-paid { background: rgba(32, 160, 96, 0.22); }
+.order-status-shipped { background: rgba(48, 120, 220, 0.22); }
+.order-status-cancelled,
+.order-status-refunded { background: rgba(200, 70, 70, 0.22); }
+
+/* Delivery step in the basket, and the destination on an admin order. */
+.cart-delivery {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.cart-delivery h3 {
+  margin: 0;
+}
+
+.cart-lines-compact {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.cart-field {
+  display: grid;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+
+.cart-field input {
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.cart-field-bad input {
+  border-color: #c84646;
+}
+
+.cart-field em {
+  color: #c84646;
+  font-style: normal;
+  font-size: 0.78rem;
+}
+
+.cart-method {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+
+.cart-method legend {
+  padding: 0 0 4px;
+}
+
+.cart-method label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.cart-method label.is-selected {
+  border-color: currentColor;
+}
+
+.cart-back {
+  background: none;
+  border: 0;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+  font: inherit;
+  padding: 4px;
+}
+
+.order-ship-to {
+  display: grid;
+  gap: 2px;
+  font-size: 0.8rem;
+  opacity: 0.75;
+  margin-top: 6px;
+}
+
+.order-ship-to em {
+  font-style: italic;
+}
+
+/* ---------------------------------------------------------------------------
+   Fulfilment console — the list staff work from, one row per order.
+   --------------------------------------------------------------------------- */
+.orders-panel {
+  padding: 20px 28px 40px;
+  display: grid;
+  gap: 16px;
+}
+
+.orders-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.orders-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.orders-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.orders-tab.active {
+  border-color: currentColor;
+  background: rgba(127, 127, 127, 0.14);
+}
+
+.orders-tab-count {
+  font-size: 0.75rem;
+  opacity: 0.65;
+}
+
+.orders-search {
+  flex: 1 1 260px;
+  max-width: 340px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.orders-error {
+  color: #c84646;
+  margin: 0;
+}
+
+.orders-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.orders-row {
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.orders-row-head {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(130px, auto) minmax(90px, auto) 1fr auto auto;
+  gap: 14px;
+  align-items: center;
+  padding: 12px 14px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.orders-row-head:hover {
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.orders-number {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+
+.orders-who,
+.orders-when {
+  font-size: 0.85rem;
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orders-total {
+  font-weight: 600;
+}
+
+.orders-detail {
+  border-top: 1px solid rgba(127, 127, 127, 0.22);
+  padding: 14px;
+  display: grid;
+  gap: 14px;
+}
+
+.orders-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px;
+}
+
+.orders-detail h4 {
+  margin: 0 0 6px;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+}
+
+.orders-address {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.orders-note {
+  margin: 8px 0 0;
+  font-size: 0.85rem;
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.orders-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.orders-action {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.orders-action:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.orders-action-shipped { border-color: rgba(48, 120, 220, 0.7); }
+.orders-action-paid { border-color: rgba(32, 160, 96, 0.7); }
+.orders-action-cancelled,
+.orders-action-refunded { border-color: rgba(200, 70, 70, 0.7); }
+
+.orders-terminal {
+  font-size: 0.85rem;
+  opacity: 0.6;
+}
+
+@media (max-width: 720px) {
+  .orders-row-head {
+    grid-template-columns: 1fr auto;
+  }
+  .orders-who,
+  .orders-when {
+    display: none;
+  }
+}
+
+/* Says what will actually be charged whenever a converted figure is on screen.
+   The shop prices in USD; everything else is a convenience. */
+.cart-approx {
+  margin: 0;
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+/* Currency rates editor. */
+.rates-panel { padding: 20px 28px 40px; display: grid; gap: 18px; max-width: 760px; }
+.rates-intro h2 { margin: 0 0 6px; }
+.rates-intro p { margin: 0; font-size: 0.88rem; opacity: 0.8; line-height: 1.5; }
+.rates-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.rates-row {
+  display: grid;
+  grid-template-columns: 64px 120px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 10px;
+}
+.rates-code { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rates-input {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.rates-input:disabled { opacity: 0.5; }
+.rates-meta { font-size: 0.8rem; opacity: 0.7; }
+.rates-actions { display: flex; gap: 6px; }
+.rates-add { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+@media (max-width: 640px) {
+  .rates-row { grid-template-columns: 1fr 1fr; }
+  .rates-meta { grid-column: 1 / -1; }
+}

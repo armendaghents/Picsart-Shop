@@ -9,6 +9,9 @@ export function makeJar() {
   return {
     header: () => [...jar].map(([key, value]) => `${key}=${value}`).join("; "),
     get: (name) => jar.get(name),
+    // Forgets one cookie while keeping the rest — the way an access token
+    // expiring looks to the browser.
+    drop: (name) => jar.delete(name),
     absorb(response) {
       for (const raw of response.headers.getSetCookie?.() || []) {
         const [pair] = raw.split(";");
@@ -79,6 +82,16 @@ export function makeClient(base, logPath) {
         .split("──────────── email")
         .filter((block) => block.includes(`To:      ${address}`));
       return ((blocks.at(-1) || "").match(/\b(\d{6})\b/) || [])[1];
+    },
+
+    // The most recent logged message to an address, so a test can assert on
+    // what a customer would actually have received rather than only that
+    // something was sent.
+    latestEmailFor(address) {
+      const blocks = readFileSync(logPath, "utf8")
+        .split("──────────── email")
+        .filter((block) => block.includes(`To:      ${address}`));
+      return blocks.at(-1) || "";
     },
 
     logContains(text) {

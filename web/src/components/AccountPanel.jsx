@@ -188,6 +188,11 @@ function TwoFactorSection({ t, user, onUserChange }) {
       <h3>{t.twoStep}</h3>
       <p className="account-meta">{user.twoFactorEnabled ? t.twoStepOn : t.twoStepOff}</p>
 
+      {/* At section level, not inside the forms: a failure while starting
+          enrolment happens before any form exists, and used to leave the
+          button looking like it had done nothing at all. */}
+      {error && <p className="auth-error">{error}</p>}
+
       {stage === "idle" && (
         <button
           className="auth-submit"
@@ -203,7 +208,7 @@ function TwoFactorSection({ t, user, onUserChange }) {
                 })
           }
         >
-          {user.twoFactorEnabled ? t.turnOff : t.turnOn}
+          {busy ? t.working : user.twoFactorEnabled ? t.turnOff : t.turnOn}
         </button>
       )}
 
@@ -227,7 +232,6 @@ function TwoFactorSection({ t, user, onUserChange }) {
             {t.verificationCode}
             <input className="code-input" value={code} onChange={(event) => setCode(event.target.value)} inputMode="numeric" maxLength={6} required />
           </label>
-          {error && <p className="auth-error">{error}</p>}
           <button className="auth-submit" type="submit" disabled={busy}>
             {busy ? t.working : t.turnOn}
           </button>
@@ -265,7 +269,6 @@ function TwoFactorSection({ t, user, onUserChange }) {
             {t.password}
             <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required />
           </label>
-          {error && <p className="auth-error">{error}</p>}
           <button className="auth-submit" type="submit" disabled={busy}>
             {busy ? t.working : t.turnOff}
           </button>
@@ -339,11 +342,14 @@ function Orders({ t, currency }) {
   return (
     <section className="account-section">
       {orders.map((order) => (
-        <article key={order.placedAt} className="order-card">
+        // Keyed by order number, not by timestamp: two orders placed in the
+        // same second are now two distinct rows, and used to collide here.
+        <article key={order.orderNumber} className="order-card">
           <header>
             <strong>{t.orderOn(formatWhen(order.placedAt))}</strong>
             <span>{formatMoney(order.total, currency, "USD")}</span>
           </header>
+          <p className="order-card-number">{order.orderNumber}</p>
           <ul>
             {order.lines.map((line) => (
               <li key={line.id}>
@@ -351,7 +357,7 @@ function Orders({ t, currency }) {
                   {line.quantity > 1 && `${line.quantity} × `}
                   {line.name || line.sku || "—"}
                 </span>
-                <span>{formatMoney(line.price * line.quantity, currency, "USD")}</span>
+                <span>{formatMoney(line.lineTotal, currency, "USD")}</span>
               </li>
             ))}
           </ul>
